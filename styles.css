@@ -1,0 +1,11 @@
+body{margin:0;font-family:Arial;background:#f4f6fb}
+.app{display:flex;height:100vh}
+.sidebar{width:240px;background:#6dbb2f;color:#083a1f;padding:20px}
+.navItem{display:block;padding:10px;margin-bottom:6px;background:#fff;border-radius:8px;cursor:pointer}
+.main{flex:1;display:flex;flex-direction:column}
+.topbar{background:#fff;padding:14px;border-bottom:1px solid #ddd;font-weight:bold}
+.content{padding:20px;overflow:auto}
+.card{background:#fff;padding:16px;border-radius:12px;box-shadow:0 5px 20px rgba(0,0,0,.08)}
+.dragItem{padding:10px;border:1px dashed #ccc;margin-bottom:8px;border-radius:8px;background:#fff;cursor:grab}
+table{width:100%;border-collapse:collapse;margin-top:12px}
+th,td{padding:8px;border-bottom:1px solid #eee;font-size:13px}
