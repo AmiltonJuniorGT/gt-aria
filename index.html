@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>GT • ARIA — HUB de Qualificação</title>
+  <title>GT • ARIA — HUB Comercial</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -15,7 +15,9 @@
       </div>
 
       <nav class="nav">
-        <a class="navItem active">Tratamento de Leads</a>
+        <a class="navItem" data-route="#/login">Login</a>
+        <a class="navItem active" data-route="#/qualificacao">Tratamento de Leads</a>
+        <a class="navItem" data-route="#/funil">Funil Diário</a>
       </nav>
 
       <div class="sidebarFoot">
@@ -25,8 +27,10 @@
 
     <main class="main">
       <header class="topbar">
-        <div>Tratamento de Leads • Qualificação</div>
-        <button id="btnReloadTop" class="btn btnGhost">Recarregar</button>
+        <div id="crumbs">Tratamento de Leads • Qualificação</div>
+        <div class="topbarRight">
+          <button id="btnReloadTop" class="btn btnGhost">Recarregar</button>
+        </div>
       </header>
 
       <section class="content" id="view"></section>
