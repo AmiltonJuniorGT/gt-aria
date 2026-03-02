@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>GT • ARIA — Acelerador de Vendas</title>
+  <title>GT • ARIA — HUB de Qualificação</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -11,21 +11,28 @@
     <aside class="sidebar">
       <div class="brand">
         <div class="brandMark">grau<span>técnico</span></div>
-        <div class="brandSub">ARIA • Protótipo</div>
+        <div class="brandSub">ARIA • HUB Comercial</div>
       </div>
+
       <nav class="nav">
-        <a class="navItem" data-route="#/login">Login</a>
-        <a class="navItem" data-route="#/qualificacao">Tratamento de Leads</a>
-        <a class="navItem" data-route="#/funil">Funil Diário</a>
+        <a class="navItem active">Tratamento de Leads</a>
       </nav>
+
+      <div class="sidebarFoot">
+        <div class="smallMuted">Protótipo • 1 Unidade</div>
+      </div>
     </aside>
+
     <main class="main">
       <header class="topbar">
-        <div id="crumbs">—</div>
+        <div>Tratamento de Leads • Qualificação</div>
+        <button id="btnReloadTop" class="btn btnGhost">Recarregar</button>
       </header>
+
       <section class="content" id="view"></section>
     </main>
   </div>
-  <script src="app.js?v=20260301"></script>
+
+  <script src="app.js"></script>
 </body>
 </html>
