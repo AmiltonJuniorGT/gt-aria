@@ -1,9 +1,10 @@
 /* ================================
-   GT ARIA — Qualificação de Leads (Layout do app anterior)
-   Base: Google Sheets CSV (público)
+   GT ARIA — Qualificação (HUB + Inteligência)
+   - Base: Google Sheets CSV (somente leitura)
+   - Operação: notas/etapa local por CPF (paralelo ao ERP)
 =================================== */
 
-/** TROQUE APENAS AQUI se mudar a planilha */
+/** === CONFIG === */
 const SHEET_CSV_URL =
   "https://docs.google.com/spreadsheets/d/1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI/export?format=csv&gid=1731723852";
 
@@ -19,24 +20,43 @@ const SORT_DIR = {
   CURSO: "asc",
 };
 
+/** Etapas locais do HUB (não mexe no ERP) */
+const HUB_STAGE = {
+  NOVO: "NOVO",
+  AQUECIDO: "AQUECIDO",
+  ENVIADO: "ENVIADO",
+  DESCARTADO: "DESCARTADO",
+};
+
+/** Storage key */
+const LS_KEY = "gt_aria_hub_by_cpf_v1";
+
 const state = {
   loading: false,
   error: "",
   lastUpdated: null,
 
   all: [],
-  viewRows: [],
 
   vendedores: [],
   vendedorSelecionado: "TODOS",
-
   prioridade: [...DEFAULT_PRIORIDADE],
 
   filters: {
+    // status pendente (planilha)
     status: { AGENDADO: true, FINALIZADOM: false, FINALIZADO: false },
-    minAgeDays: 0,     // 0 = sem filtro
-    agBucket: "",      // "", "0-1", "2-3", "4+"
+    // etapa hub (local)
+    hub: { NOVO: true, AQUECIDO: true, ENVIADO: true, DESCARTADO: false },
+    // lead velho
+    minAgeDays: 0,
+    // faixa de agendamentos
+    agBucket: "",
+    // busca
+    q: "",
   },
+
+  /** dados locais por CPF */
+  hubByCpf: loadHubByCpf(),
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -44,7 +64,7 @@ const $ = (sel) => document.querySelector(sel);
 init();
 
 /* ------------------------------
-   INIT + ROUTER (mantém padrão do app)
+   INIT + ROUTER
 -------------------------------- */
 function init() {
   window.addEventListener("hashchange", renderRoute);
@@ -53,7 +73,6 @@ function init() {
     renderRoute();
   });
 
-  // sidebar links (index.html usa data-route)
   document.querySelectorAll("[data-route]").forEach((a) => {
     a.addEventListener("click", () => {
       location.hash = a.getAttribute("data-route");
@@ -69,10 +88,11 @@ async function boot() {
   try {
     const csvText = await fetchCsvNoCache(SHEET_CSV_URL);
     const rows = parseCSVRobusto(csvText);
-
     const normalizedRows = rows.map(normalizeRowKeys);
+
     state.all = normalizedRows.map((r, idx) => normalizeLead(r, idx));
 
+    // vendedores
     state.vendedores = unique(
       state.all
         .map((l) => l.VENDEDOR)
@@ -80,7 +100,11 @@ async function boot() {
         .map((v) => v.trim())
     ).sort((a, b) => a.localeCompare(b, "pt-BR"));
 
+    // score
     if (ENABLE_SCORE_IA) computeScoreIA(state.all);
+
+    // aplica etapa hub local (se existir)
+    attachHubLocal(state.all);
 
     state.lastUpdated = new Date();
     state.loading = false;
@@ -120,7 +144,7 @@ function renderPlaceholder(title) {
 }
 
 /* ------------------------------
-   QUALIFICAÇÃO UI (estilo do app anterior)
+   QUALIFICAÇÃO UI
 -------------------------------- */
 function renderQualificacao() {
   const view = $("#view");
@@ -128,14 +152,13 @@ function renderQualificacao() {
   if (state.loading) return renderLoading("Carregando…");
   if (state.error) return renderError(state.error);
 
-  const resumoStatus = statusResumo();
   const totalAll = state.all.length;
 
   view.innerHTML = `
     <div class="card">
       <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;">
         <div>
-          <h2 style="margin:0 0 4px 0;">Qualificação de Leads</h2>
+          <h2 style="margin:0 0 4px 0;">Qualificação de Leads (HUB)</h2>
           <div style="opacity:.85;font-size:13px">
             Base: <b>${totalAll}</b>
             ${state.lastUpdated ? `• Atualizado: <b>${formatDateTime(state.lastUpdated)}</b>` : ""}
@@ -157,11 +180,15 @@ function renderQualificacao() {
           <button id="btnGerar" style="padding:8px 10px;border-radius:10px;border:none;background:#083a1f;color:#fff;cursor:pointer;">
             Gerar Lista
           </button>
+
+          <button id="btnExport" style="padding:8px 10px;border-radius:10px;border:1px solid #ddd;background:#fff;cursor:pointer;">
+            Exportar HUB (CSV)
+          </button>
         </div>
       </div>
 
       <div style="margin-top:10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
-        <div style="font-size:13px;opacity:.85;"><b>Status:</b></div>
+        <div style="font-size:13px;opacity:.85;"><b>Status (Planilha):</b></div>
 
         <label style="font-size:13px;">
           <input type="checkbox" id="stAG" ${state.filters.status.AGENDADO ? "checked" : ""} />
@@ -178,6 +205,27 @@ function renderQualificacao() {
           Finalizado
         </label>
 
+        <div style="font-size:13px;opacity:.85;margin-left:8px;"><b>Etapa (HUB):</b></div>
+
+        <label style="font-size:13px;">
+          <input type="checkbox" id="hbN" ${state.filters.hub.NOVO ? "checked" : ""} />
+          Novo
+        </label>
+        <label style="font-size:13px;">
+          <input type="checkbox" id="hbA" ${state.filters.hub.AQUECIDO ? "checked" : ""} />
+          Aquecido
+        </label>
+        <label style="font-size:13px;">
+          <input type="checkbox" id="hbE" ${state.filters.hub.ENVIADO ? "checked" : ""} />
+          Enviado
+        </label>
+        <label style="font-size:13px;">
+          <input type="checkbox" id="hbD" ${state.filters.hub.DESCARTADO ? "checked" : ""} />
+          Descartado
+        </label>
+      </div>
+
+      <div style="margin-top:10px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
         <label style="font-size:13px;opacity:.9;">
           Lead antigo (>= dias):
           <select id="selAge" style="margin-left:6px;padding:6px 8px;border-radius:8px;border:1px solid #ddd;">
@@ -192,9 +240,11 @@ function renderQualificacao() {
           </select>
         </label>
 
-        <div style="font-size:12px;opacity:.75;">
-          Ativos: <b>${escapeHtml(resumoStatus)}</b>
-        </div>
+        <label style="font-size:13px;opacity:.9;">
+          Buscar (CPF/Nome):
+          <input id="inpQ" value="${escapeAttr(state.filters.q || "")}" placeholder="Digite CPF ou nome..."
+            style="margin-left:6px;padding:6px 8px;border-radius:8px;border:1px solid #ddd;min-width:240px;" />
+        </label>
       </div>
     </div>
 
@@ -204,7 +254,7 @@ function renderQualificacao() {
       <h3 style="margin:0 0 8px 0;">Prioridade de Ordenação (arraste)</h3>
       <div id="drag" style="max-width:520px;"></div>
       <div style="font-size:12px;opacity:.8;margin-top:8px;">
-        Recomendado: <b>Score IA</b> primeiro (fixo), depois sua prioridade.
+        Score IA é prioridade fixa (primeiro). Depois, sua ordem arrastável.
       </div>
     </div>
 
@@ -222,18 +272,22 @@ function renderQualificacao() {
             <tr>
               <th>#</th>
               <th>Nome</th>
-              <th>Vendedor</th>
-              <th>Data Cadastro</th>
-              <th>Mídia</th>
+              <th>CPF</th>
               <th>Curso</th>
+              <th>Mídia</th>
+              <th>Vendedor</th>
+              <th>Data Cad.</th>
               <th>Agend.</th>
               <th>Status</th>
+              <th>Etapa HUB</th>
               ${ENABLE_SCORE_IA ? "<th>Score IA</th>" : ""}
-              <th>Fone</th>
+              <th>Contato</th>
+              <th>Ações</th>
+              <th>Nota HUB</th>
             </tr>
           </thead>
           <tbody id="tbody">
-            <tr><td colspan="${ENABLE_SCORE_IA ? 10 : 9}" style="opacity:.7;">Clique em <b>Gerar Lista</b>.</td></tr>
+            <tr><td colspan="${ENABLE_SCORE_IA ? 14 : 13}" style="opacity:.7;">Clique em <b>Gerar Lista</b>.</td></tr>
           </tbody>
         </table>
       </div>
@@ -256,16 +310,32 @@ function bindQualificacaoUI() {
     renderRoute();
   });
 
+  $("#btnExport").addEventListener("click", exportHubCsv);
+
+  // status planilha
   $("#stAG").addEventListener("change", (e) => (state.filters.status.AGENDADO = !!e.target.checked));
   $("#stFM").addEventListener("change", (e) => (state.filters.status.FINALIZADOM = !!e.target.checked));
   $("#stF").addEventListener("change", (e) => (state.filters.status.FINALIZADO = !!e.target.checked));
 
+  // etapa hub
+  $("#hbN").addEventListener("change", (e) => (state.filters.hub.NOVO = !!e.target.checked));
+  $("#hbA").addEventListener("change", (e) => (state.filters.hub.AQUECIDO = !!e.target.checked));
+  $("#hbE").addEventListener("change", (e) => (state.filters.hub.ENVIADO = !!e.target.checked));
+  $("#hbD").addEventListener("change", (e) => (state.filters.hub.DESCARTADO = !!e.target.checked));
+
+  // idade
   $("#selAge").addEventListener("change", (e) => {
     state.filters.minAgeDays = parseInt(e.target.value || "0", 10) || 0;
   });
 
+  // agendamentos
   $("#selAg").addEventListener("change", (e) => {
     state.filters.agBucket = e.target.value || "";
+  });
+
+  // busca
+  $("#inpQ").addEventListener("input", (e) => {
+    state.filters.q = e.target.value || "";
   });
 }
 
@@ -291,7 +361,6 @@ function renderAgeOptions() {
     { v: "120", t: "120" },
     { v: "180", t: "180" },
   ];
-
   return options
     .map((o) => `<option value="${o.v}" ${String(state.filters.minAgeDays) === o.v ? "selected" : ""}>${o.t}</option>`)
     .join("");
@@ -304,7 +373,6 @@ function renderAgOptions() {
     { v: "2-3", t: "2–3" },
     { v: "4+", t: "4+" },
   ];
-
   return options
     .map((o) => `<option value="${o.v}" ${state.filters.agBucket === o.v ? "selected" : ""}>${o.t}</option>`)
     .join("");
@@ -319,7 +387,7 @@ function renderDrag() {
 
   state.prioridade.forEach((p) => {
     const div = document.createElement("div");
-    div.className = "dragItem"; // mantém classe do app antigo
+    div.className = "dragItem";
     div.draggable = true;
     div.textContent = p;
     drag.appendChild(div);
@@ -376,16 +444,22 @@ function gerarLista() {
     lista = lista.filter((l) => (l.VENDEDOR || "").trim() === state.vendedorSelecionado);
   }
 
-  // status pendente (multi)
-  lista = lista.filter(passesStatusFilter);
+  // status planilha
+  lista = lista.filter(passesStatusPlanilha);
+
+  // etapa hub
+  lista = lista.filter(passesHubStage);
 
   // idade
   lista = lista.filter(passesAgeFilter);
 
-  // faixa de agendamentos
+  // faixa agendamentos
   lista = lista.filter(passesAgBucket);
 
-  // Score IA primeiro (se habilitado), depois sua prioridade arrastável
+  // busca
+  lista = lista.filter(passesQuery);
+
+  // sort: Score IA primeiro, depois prioridade
   lista.sort((a, b) => {
     if (ENABLE_SCORE_IA) {
       const sa = Number.isFinite(a.SCORE_IA) ? a.SCORE_IA : 0;
@@ -398,17 +472,25 @@ function gerarLista() {
   renderTabela(lista);
 
   const info = $("#resultadoInfo");
-  info.textContent = `Linhas: ${lista.length} • Status: ${statusResumo()} • Idade>=${state.filters.minAgeDays || 0}d • Agend.: ${state.filters.agBucket || "Todos"}`;
+  info.textContent = `Linhas: ${lista.length} • Status: ${statusResumoPlanilha()} • HUB: ${hubResumo()} • Idade>=${state.filters.minAgeDays || 0}d • Agend.: ${state.filters.agBucket || "Todos"}`;
 }
 
-function passesStatusFilter(l) {
-  const s = getStatusPendente(l);
+function passesStatusPlanilha(l) {
+  const s = getStatusPendente(l); // AGENDADO / FINALIZADOM / FINALIZADO
   const f = state.filters.status;
   if (s === "AGENDADO") return !!f.AGENDADO;
   if (s === "FINALIZADOM") return !!f.FINALIZADOM;
   if (s === "FINALIZADO") return !!f.FINALIZADO;
+  return true; // desconhecido
+}
 
-  // se vier vazio ou diferente, inclui (pode mudar depois)
+function passesHubStage(l) {
+  const st = String(l.HUB_STAGE || HUB_STAGE.NOVO).toUpperCase();
+  const f = state.filters.hub;
+  if (st === HUB_STAGE.NOVO) return !!f.NOVO;
+  if (st === HUB_STAGE.AQUECIDO) return !!f.AQUECIDO;
+  if (st === HUB_STAGE.ENVIADO) return !!f.ENVIADO;
+  if (st === HUB_STAGE.DESCARTADO) return !!f.DESCARTADO;
   return true;
 }
 
@@ -421,14 +503,27 @@ function passesAgeFilter(l) {
 function passesAgBucket(l) {
   const b = state.filters.agBucket || "";
   if (!b) return true;
-
   const n = toInt(l.TOTAL_AGENDAMENTOS);
 
   if (b === "0-1") return n >= 0 && n <= 1;
   if (b === "2-3") return n >= 2 && n <= 3;
   if (b === "4+") return n >= 4;
-
   return true;
+}
+
+function passesQuery(l) {
+  const q = String(state.filters.q || "").trim();
+  if (!q) return true;
+
+  const qn = q.replace(/\D/g, ""); // se digitarem cpf com pontuação
+  const cpf = String(l.CPF || "").replace(/\D/g, "");
+  const nome = String(l.NOME || "").toLowerCase();
+
+  if (qn && cpf.includes(qn)) return true;
+  if (String(l.CPF || "").toLowerCase().includes(q.toLowerCase())) return true;
+  if (nome.includes(q.toLowerCase())) return true;
+
+  return false;
 }
 
 function makeMultiComparator(keys) {
@@ -443,7 +538,7 @@ function makeMultiComparator(keys) {
       if (k === "TOTAL_AGENDAMENTOS") {
         cmp = toInt(av) - toInt(bv);
       } else if (k === "DATA_CADASTRO") {
-        // padrão desc
+        // default desc
         cmp = toDate(bv) - toDate(av);
         if (dir === "asc") cmp = -cmp;
       } else {
@@ -458,7 +553,7 @@ function makeMultiComparator(keys) {
 
 function renderTabela(lista) {
   const tbody = $("#tbody");
-  const colspan = ENABLE_SCORE_IA ? 10 : 9;
+  const colspan = ENABLE_SCORE_IA ? 14 : 13;
 
   if (!lista.length) {
     tbody.innerHTML = `<tr><td colspan="${colspan}" style="opacity:.7;">Nenhum lead para este filtro.</td></tr>`;
@@ -467,32 +562,155 @@ function renderTabela(lista) {
 
   tbody.innerHTML = lista
     .map((l, i) => {
-      const status = getStatusPendente(l);
+      const stPlan = getStatusPendente(l);
+      const hubStage = l.HUB_STAGE || HUB_STAGE.NOVO;
       const score = ENABLE_SCORE_IA && Number.isFinite(l.SCORE_IA) ? Number(l.SCORE_IA).toFixed(3) : "";
-      const fone = l.FONE || l.FONE2 || l.FONE3 || "";
+      const fone = firstPhone(l);
+      const wa = fone ? makeWhatsUrl(fone) : "";
+
+      const nota = getHubLocal(l.CPF)?.nota || "";
+
       return `
-        <tr>
+        <tr data-cpf="${escapeAttr(l.CPF || "")}">
           <td>${i + 1}</td>
           <td>${escapeHtml(l.NOME || "")}</td>
+          <td>${escapeHtml(l.CPF || "")}</td>
+          <td>${escapeHtml(l.CURSO || "")}</td>
+          <td>${escapeHtml(l.MIDIA || "")}</td>
           <td>${escapeHtml(l.VENDEDOR || "")}</td>
           <td>${escapeHtml(l.DATA_CADASTRO || "")}</td>
-          <td>${escapeHtml(l.MIDIA || "")}</td>
-          <td>${escapeHtml(l.CURSO || "")}</td>
           <td>${escapeHtml(String(toInt(l.TOTAL_AGENDAMENTOS)))}</td>
-          <td>${escapeHtml(status)}</td>
+          <td>${escapeHtml(stPlan)}</td>
+          <td><b>${escapeHtml(hubStage)}</b></td>
           ${ENABLE_SCORE_IA ? `<td>${score}</td>` : ""}
-          <td>${escapeHtml(fone)}</td>
+          <td>${escapeHtml(fone || "")}</td>
+          <td style="white-space:nowrap;">
+            <button class="miniBtn" data-act="copycpf">CPF</button>
+            <button class="miniBtn" data-act="copyfone" ${fone ? "" : "disabled"}>Fone</button>
+            <button class="miniBtn" data-act="whats" ${wa ? "" : "disabled"}>Whats</button>
+            <button class="miniBtn" data-act="aquecer">Aquecer</button>
+            <button class="miniBtn" data-act="enviar">Enviar</button>
+            <button class="miniBtn" data-act="descartar">Descartar</button>
+          </td>
+          <td style="min-width:240px;">
+            <input class="notaInp" data-act="nota" value="${escapeAttr(nota)}"
+              placeholder="Nota do HUB (salva no navegador)…"
+              style="width:100%;padding:6px 8px;border-radius:8px;border:1px solid #ddd;" />
+          </td>
         </tr>
       `;
     })
     .join("");
+
+  // bind ações por linha (delegação)
+  tbody.querySelectorAll("tr").forEach((tr) => {
+    const cpf = tr.getAttribute("data-cpf") || "";
+
+    tr.querySelectorAll("button[data-act]").forEach((btn) => {
+      btn.addEventListener("click", () => handleRowAction(btn.getAttribute("data-act"), cpf));
+    });
+
+    const notaInp = tr.querySelector("input[data-act='nota']");
+    if (notaInp) {
+      notaInp.addEventListener("change", (e) => {
+        upsertHubLocal(cpf, { nota: e.target.value || "" });
+      });
+    }
+  });
 }
 
 /* ------------------------------
-   SCORE IA (ratificação do “quente x esforço”)
-   - sucesso: STATUS_PENDENTE = FINALIZADOM
-   - taxa histórica por MIDIA|CURSO
-   - penalidade por TOTAL_AGENDAMENTOS (energia)
+   AÇÕES DO HUB (local)
+-------------------------------- */
+function handleRowAction(act, cpf) {
+  const lead = state.all.find((l) => String(l.CPF || "") === String(cpf || ""));
+  if (!lead) return;
+
+  const fone = firstPhone(lead);
+
+  if (act === "copycpf") {
+    copyText(String(lead.CPF || ""));
+    toast("CPF copiado.");
+    return;
+  }
+
+  if (act === "copyfone") {
+    copyText(String(fone || ""));
+    toast("Telefone copiado.");
+    return;
+  }
+
+  if (act === "whats") {
+    const url = makeWhatsUrl(fone);
+    if (url) window.open(url, "_blank");
+    return;
+  }
+
+  if (act === "aquecer") {
+    upsertHubLocal(cpf, { stage: HUB_STAGE.AQUECIDO });
+    lead.HUB_STAGE = HUB_STAGE.AQUECIDO;
+    // pequeno boost local (ratifica aquecido)
+    if (ENABLE_SCORE_IA) lead.SCORE_IA = (lead.SCORE_IA || 0) + 0.05;
+    gerarLista();
+    toast("Lead marcado como AQUECIDO (local).");
+    return;
+  }
+
+  if (act === "enviar") {
+    upsertHubLocal(cpf, { stage: HUB_STAGE.ENVIADO });
+    lead.HUB_STAGE = HUB_STAGE.ENVIADO;
+    gerarLista();
+    toast("Lead marcado como ENVIADO (local).");
+    return;
+  }
+
+  if (act === "descartar") {
+    upsertHubLocal(cpf, { stage: HUB_STAGE.DESCARTADO });
+    lead.HUB_STAGE = HUB_STAGE.DESCARTADO;
+    gerarLista();
+    toast("Lead marcado como DESCARTADO (local).");
+    return;
+  }
+}
+
+/* ------------------------------
+   EXPORTAÇÃO (handoff para ERP)
+   - CSV com CPF + Stage + Nota + UpdatedAt
+-------------------------------- */
+function exportHubCsv() {
+  const rows = [];
+
+  // cabeçalho
+  rows.push(["CPF", "HUB_STAGE", "HUB_NOTA", "UPDATED_AT"].join(","));
+
+  const entries = Object.entries(state.hubByCpf || {});
+  // ordena por updatedAt desc
+  entries.sort((a, b) => (b[1]?.updatedAt || 0) - (a[1]?.updatedAt || 0));
+
+  for (const [cpf, obj] of entries) {
+    const stage = obj?.stage || HUB_STAGE.NOVO;
+    const nota = (obj?.nota || "").replaceAll('"', '""');
+    const ts = obj?.updatedAt ? new Date(obj.updatedAt).toISOString() : "";
+    rows.push([csvCell(cpf), csvCell(stage), `"${nota}"`, csvCell(ts)].join(","));
+  }
+
+  const content = rows.join("\n");
+  const filename = `gt_aria_hub_${new Date().toISOString().slice(0, 10)}.csv`;
+  downloadTextFile(content, filename, "text/csv;charset=utf-8");
+  toast("CSV do HUB gerado.");
+}
+
+function csvCell(v) {
+  const s = String(v ?? "");
+  // se tiver vírgula/aspas/quebra, coloca aspas
+  if (/[,"\n\r]/.test(s)) return `"${s.replaceAll('"', '""')}"`;
+  return s;
+}
+
+/* ------------------------------
+   SCORE IA (histórico por MIDIA|CURSO)
+   sucesso: STATUS_PENDENTE = FINALIZADOM
+   penaliza energia (agendamentos)
 -------------------------------- */
 function computeScoreIA(allLeads) {
   const total = new Map();
@@ -512,26 +730,103 @@ function computeScoreIA(allLeads) {
     const taxa = (mat.get(key) || 0) / Math.max(1, total.get(key) || 0);
 
     const ag = Math.max(0, toInt(l.TOTAL_AGENDAMENTOS));
-    const penalidadeEnergia = 1 / (1 + ag); // 1.0, 0.5, 0.33...
+    const penalidadeEnergia = 1 / (1 + ag);
 
-    // pesos: 70% “quente histórico”, 30% “baixo esforço”
     l.SCORE_IA = taxa * 0.7 + penalidadeEnergia * 0.3;
   }
 }
 
 /* ------------------------------
-   CSV FETCH + PARSE (robusto)
+   LOCAL HUB STORE
+-------------------------------- */
+function loadHubByCpf() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return {};
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj === "object") return obj;
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+function saveHubByCpf() {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(state.hubByCpf || {}));
+  } catch {
+    // ignore
+  }
+}
+
+function getHubLocal(cpf) {
+  const key = String(cpf || "").trim();
+  if (!key) return null;
+  return state.hubByCpf[key] || null;
+}
+
+function upsertHubLocal(cpf, patch) {
+  const key = String(cpf || "").trim();
+  if (!key) return;
+
+  const cur = state.hubByCpf[key] || { stage: HUB_STAGE.NOVO, nota: "", updatedAt: 0 };
+  const next = {
+    ...cur,
+    ...patch,
+    stage: patch.stage || cur.stage || HUB_STAGE.NOVO,
+    nota: patch.nota != null ? patch.nota : cur.nota,
+    updatedAt: Date.now(),
+  };
+
+  state.hubByCpf[key] = next;
+  saveHubByCpf();
+}
+
+function attachHubLocal(leads) {
+  for (const l of leads) {
+    const cpf = String(l.CPF || "").trim();
+    const hub = cpf ? getHubLocal(cpf) : null;
+    l.HUB_STAGE = hub?.stage || HUB_STAGE.NOVO;
+  }
+}
+
+/* ------------------------------
+   STATUS (planilha)
+-------------------------------- */
+function normStatus(v) {
+  return String(v || "").trim().toUpperCase().replace(/\s+/g, "");
+}
+function getStatusPendente(l) {
+  return normStatus(l.STATUS_PENDENTE || l.STATUS_PENDENCIA || "");
+}
+function statusResumoPlanilha() {
+  const s = state.filters.status;
+  const on = [];
+  if (s.AGENDADO) on.push("Agendado");
+  if (s.FINALIZADOM) on.push("FinalizadoM");
+  if (s.FINALIZADO) on.push("Finalizado");
+  return on.join(", ") || "Nenhum";
+}
+function hubResumo() {
+  const h = state.filters.hub;
+  const on = [];
+  if (h.NOVO) on.push("Novo");
+  if (h.AQUECIDO) on.push("Aquecido");
+  if (h.ENVIADO) on.push("Enviado");
+  if (h.DESCARTADO) on.push("Descartado");
+  return on.join(", ") || "Nenhum";
+}
+
+/* ------------------------------
+   HELPERS
 -------------------------------- */
 async function fetchCsvNoCache(url) {
   const res = await fetch(url, { cache: "no-store" });
-  if (!res.ok) throw new Error("Erro ao carregar CSV. Confirme se a planilha está pública.");
+  if (!res.ok) throw new Error("Erro ao carregar CSV. Confirme se a planilha está pública e o gid está correto.");
   return await res.text();
 }
 
-/**
- * CSV robusto (aspas, vírgula dentro de aspas, etc.)
- * Retorna array de objetos usando headers da primeira linha.
- */
+/** CSV robusto */
 function parseCSVRobusto(text) {
   text = text.replace(/^\uFEFF/, "");
 
@@ -612,10 +907,7 @@ function normalizeKey(k) {
     .replace(/\s+/g, "_");
 }
 
-/* ------------------------------
-   MAPEAMENTO conforme seus cabeçalhos
-   (#, MARCA, NOME, CURSO, MIDIA, FONE..., STATUS..., DATA..., TOTAL_AGENDAMENTOS, STATUS_PENDENTE/PENDENCIA, VENDEDOR)
--------------------------------- */
+/** Mapeamento conforme cabeçalhos */
 function normalizeLead(r, idx) {
   const get = (...keys) => {
     for (const k of keys) {
@@ -634,6 +926,7 @@ function normalizeLead(r, idx) {
     ID: idx + 1,
     MARCA: get("MARCA"),
     NOME: get("NOME"),
+    CPF: get("CPF"),
     CURSO: get("CURSO"),
     MIDIA: get("MIDIA"),
     FONE: get("FONE"),
@@ -648,11 +941,12 @@ function normalizeLead(r, idx) {
     DATA_AGENDAMENTO: get("DATA_AGENDAMENTO"),
     TOTAL_AGENDAMENTOS: toInt(get("TOTAL_AGENDAMENTOS")),
     STATUS_PENDENTE: get("STATUS_PENDENTE", "STATUS_PENDENCIA"),
+    STATUS_PENDENCIA: get("STATUS_PENDENCIA"), // compat
     VENDEDOR: get("VENDEDOR"),
+    HUB_STAGE: HUB_STAGE.NOVO,
     SCORE_IA: null,
   };
 
-  // garante chaves de ordenação
   DEFAULT_PRIORIDADE.forEach((k) => {
     if (!(k in lead)) lead[k] = "";
   });
@@ -660,30 +954,76 @@ function normalizeLead(r, idx) {
   return lead;
 }
 
-/* ------------------------------
-   STATUS helpers (3 valores)
--------------------------------- */
-function normStatus(v) {
-  return String(v || "").trim().toUpperCase().replace(/\s+/g, "");
+function firstPhone(l) {
+  const a = String(l.FONE || "").trim();
+  const b = String(l.FONE2 || "").trim();
+  const c = String(l.FONE3 || "").trim();
+  return a || b || c || "";
 }
 
-function getStatusPendente(l) {
-  // aceita STATUS_PENDENTE ou STATUS_PENDENCIA
-  return normStatus(l.STATUS_PENDENTE || l.STATUS_PENDENCIA || "");
+function makeWhatsUrl(phone) {
+  const p = String(phone || "").replace(/\D/g, "");
+  if (!p) return "";
+  // Brasil: se vier com 55 ok, se não tiver, assume BR
+  const full = p.startsWith("55") ? p : `55${p}`;
+  return `https://wa.me/${full}`;
 }
 
-function statusResumo() {
-  const s = state.filters.status;
-  const on = [];
-  if (s.AGENDADO) on.push("Agendado");
-  if (s.FINALIZADOM) on.push("FinalizadoM");
-  if (s.FINALIZADO) on.push("Finalizado");
-  return on.join(", ") || "Nenhum";
+function copyText(text) {
+  const s = String(text ?? "");
+  if (!s) return;
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(s).catch(() => {});
+  } else {
+    const ta = document.createElement("textarea");
+    ta.value = s;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch {}
+    document.body.removeChild(ta);
+  }
 }
 
-/* ------------------------------
-   Date helpers
--------------------------------- */
+function downloadTextFile(content, filename, mime) {
+  const blob = new Blob([content], { type: mime || "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename || "export.txt";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function toast(msg) {
+  // toast minimalista sem CSS extra
+  const id = "gt_aria_toast";
+  let el = document.getElementById(id);
+  if (!el) {
+    el = document.createElement("div");
+    el.id = id;
+    el.style.position = "fixed";
+    el.style.right = "14px";
+    el.style.bottom = "14px";
+    el.style.padding = "10px 12px";
+    el.style.borderRadius = "12px";
+    el.style.background = "rgba(0,0,0,.78)";
+    el.style.color = "#fff";
+    el.style.fontSize = "13px";
+    el.style.zIndex = "9999";
+    el.style.maxWidth = "320px";
+    el.style.boxShadow = "0 8px 22px rgba(0,0,0,.25)";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = "1";
+  clearTimeout(el._t);
+  el._t = setTimeout(() => {
+    el.style.opacity = "0";
+  }, 1600);
+}
+
 function ageDaysFromCadastro(l) {
   const t = toDate(l.DATA_CADASTRO);
   if (!t) return 0;
@@ -697,7 +1037,6 @@ function toDate(v) {
   const iso = Date.parse(s);
   if (!Number.isNaN(iso)) return iso;
 
-  // BR dd/mm/yyyy (com ou sem hora)
   const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
   if (m) {
     const dd = parseInt(m[1], 10);
@@ -731,7 +1070,7 @@ function formatDateTime(d) {
 }
 
 /* ------------------------------
-   RENDER helpers
+   RENDER HELPERS
 -------------------------------- */
 function renderLoading(msg) {
   const view = $("#view");
@@ -776,3 +1115,16 @@ function escapeHtml(s) {
 function escapeAttr(s) {
   return escapeHtml(s).replaceAll('"', "&quot;");
 }
+
+/* ------------------------------
+   Mini CSS via classe (sem mudar styles.css)
+-------------------------------- */
+(function injectMiniCss() {
+  const css = `
+    .miniBtn{padding:6px 8px;border-radius:10px;border:1px solid #ddd;background:#fff;cursor:pointer;font-size:12px;margin-right:6px}
+    .miniBtn:disabled{opacity:.45;cursor:not-allowed}
+  `;
+  const st = document.createElement("style");
+  st.textContent = css;
+  document.head.appendChild(st);
+})();
