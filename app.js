@@ -1,19 +1,20 @@
 /* ================================
    GT ARIA — Qualificação (Google Sheets CSV)
-   (Versão anterior com topo compacto + drag)
+   - Filtros: Marca, Vendedor, Recência (DATA_CADASTRO), Status, Agend, Busca
+   - Sugestão IA: recomenda combinações (sem impor)
+   - Conversão: STATUS_PENDENTE == "FinalizadoM" (virou cliente)
 =================================== */
 
 /** Google Sheets (CSV via export) */
 const SHEET_CSV_URL =
   "https://docs.google.com/spreadsheets/d/1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI/export?format=csv&gid=1731723852";
 
-/** Opcional: Score simples por conversão */
+/** Score simples por conversão (para ordenar) */
 const ENABLE_SCORE_IA = true;
 
-/** Ordenação padrão solicitada */
+/** Ordenação padrão (arrastável) */
 const DEFAULT_PRIORIDADE = ["VENDEDOR", "DATA_CADASTRO", "TOTAL_AGENDAMENTOS", "MIDIA", "CURSO"];
 
-/** Direção por campo */
 const SORT_DIR = {
   VENDEDOR: "asc",
   DATA_CADASTRO: "desc",
@@ -22,39 +23,55 @@ const SORT_DIR = {
   CURSO: "asc",
 };
 
+const RECENCY_OPTIONS = [
+  { key: "TODOS", label: "Todos" },
+  { key: "0_30", label: "0–30 dias" },
+  { key: "31_60", label: "31–60" },
+  { key: "61_90", label: "61–90" },
+  { key: "90P", label: "90+" },
+];
+
+const AGEND_BUCKETS = [
+  { key: "TODOS", label: "Todos" },
+  { key: "0_1", label: "0–1" },
+  { key: "2_3", label: "2–3" },
+  { key: "4P", label: "4+" },
+];
+
 const state = {
   loading: false,
   error: "",
   lastUpdated: null,
 
   all: [],
-  leads: [],
 
   vendedores: [],
   marcas: [],
 
+  // filtros topo
   vendedorSelecionado: "TODOS",
   marcaSelecionada: "AMBOS",
-
-  // filtros (topo compacto)
-  statusPlanilha: { AGENDADO: true, FINALIZADOM: false, FINALIZADO: false },
-  etapaHub: { NOVO: true, AQUECIDO: true, ENVIADO: true, DESCARTADO: false },
-
-  // opcionais existentes
-  leadAntigoDias: "TODOS",
-  agendFiltro: "TODOS",
+  recenciaSelecionada: "TODOS",
+  agendBucket: "TODOS",
   busca: "",
 
+  // status (planilha)
+  statusPlanilha: { AGENDADO: true, FINALIZADOM: false, FINALIZADO: false },
+
+  // drag
   prioridade: [...DEFAULT_PRIORIDADE],
+
+  // sugestões IA calculadas
+  sugestoes: {
+    quick: null, // fechamento rápido
+    hub: null,   // missão HUB
+  },
 };
 
 const $ = (sel) => document.querySelector(sel);
 
 init();
 
-/* ------------------------------
-   INIT
--------------------------------- */
 function init() {
   window.addEventListener("hashchange", renderRoute);
   window.addEventListener("load", async () => {
@@ -63,12 +80,9 @@ function init() {
   });
 
   document.querySelectorAll("[data-route]").forEach((a) => {
-    a.addEventListener("click", () => {
-      location.hash = a.getAttribute("data-route");
-    });
+    a.addEventListener("click", () => (location.hash = a.getAttribute("data-route")));
   });
 
-  // topo
   $("#btnReloadTop")?.addEventListener("click", async () => {
     await boot();
     renderRoute();
@@ -87,28 +101,20 @@ async function boot() {
 
     state.all = normalizedRows.map((r, idx) => normalizeLead(r, idx));
 
-    // vendedores
+    // listas
     state.vendedores = unique(
-      state.all
-        .map((l) => l.VENDEDOR)
-        .filter((v) => (v || "").trim().length > 0)
-        .map((v) => v.trim())
+      state.all.map((l) => (l.VENDEDOR || "").trim()).filter(Boolean)
     ).sort((a, b) => a.localeCompare(b, "pt-BR"));
 
-    // marcas (Técnico / Profissionalizante)
     state.marcas = unique(
-      state.all
-        .map((l) => l.MARCA)
-        .filter((m) => (m || "").trim().length > 0)
-        .map((m) => normalizeMarcaLabel(m))
+      state.all.map((l) => normalizeMarcaLabel(l.MARCA)).filter(Boolean)
     ).sort((a, b) => a.localeCompare(b, "pt-BR"));
 
-    // base da tela: aqui mantemos "não matriculados" como antes.
-    // Na sua base, o "matriculado" é FinalizadoM (Status_Pendente).
-    // Então: leads = tudo que NÃO é FinalizadoM, por padrão.
-    state.leads = state.all.filter((l) => !isMatriculado(l));
-
+    // score (para ordenação)
     if (ENABLE_SCORE_IA) computeScoreIA(state.all);
+
+    // sugestões IA (recomendação de combinação)
+    state.sugestoes = computeSuggestions(state.all);
 
     state.lastUpdated = new Date();
     state.loading = false;
@@ -121,8 +127,8 @@ async function boot() {
 
 function renderRoute() {
   const hash = location.hash || "#/qualificacao";
-
   const crumbs = $("#crumbs");
+
   if (crumbs) {
     crumbs.textContent =
       hash === "#/login"
@@ -138,8 +144,7 @@ function renderRoute() {
 }
 
 function renderPlaceholder(title) {
-  const view = $("#view");
-  view.innerHTML = `
+  $("#view").innerHTML = `
     <div class="card">
       <h2 style="margin:0 0 8px 0;">${escapeHtml(title)}</h2>
       <div style="opacity:.8">Tela em construção.</div>
@@ -147,16 +152,17 @@ function renderPlaceholder(title) {
   `;
 }
 
-/* ------------------------------
-   QUALIFICAÇÃO UI
--------------------------------- */
+/* =========================
+   UI: Qualificação
+========================= */
 function renderQualificacao() {
   const view = $("#view");
-
   if (state.loading) return renderLoading("Carregando…");
   if (state.error) return renderError(state.error);
 
   const totalAll = state.all.length;
+  const totalMat = state.all.filter(isMatriculado).length;
+  const totalNaoMat = totalAll - totalMat;
 
   view.innerHTML = `
     <div class="card">
@@ -164,13 +170,13 @@ function renderQualificacao() {
         <div>
           <h2 style="margin:0 0 4px 0;">Qualificação de Leads (HUB)</h2>
           <div class="muted small">
-            Base: <b>${totalAll}</b>
+            Base: <b>${totalAll}</b> • Não clientes: <b>${totalNaoMat}</b> • Clientes (FinalizadoM): <b>${totalMat}</b>
             ${state.lastUpdated ? `• Atualizado: <b>${formatDateTime(state.lastUpdated)}</b>` : ""}
           </div>
         </div>
 
         <div class="row" style="align-items:flex-end;">
-          <div class="ctrl" style="min-width:220px;">
+          <div class="ctrl" style="min-width:210px;">
             <label>Marca</label>
             <select id="selMarca" class="select">
               <option value="AMBOS">Ambos</option>
@@ -179,7 +185,7 @@ function renderQualificacao() {
             </select>
           </div>
 
-          <div class="ctrl" style="min-width:220px;">
+          <div class="ctrl" style="min-width:210px;">
             <label>Vendedor</label>
             <select id="selVendedor" class="select">
               <option value="TODOS">Todos</option>
@@ -189,7 +195,7 @@ function renderQualificacao() {
 
           <button id="btnRecarregar" class="btn btnGhost">Recarregar</button>
           <button id="btnGerar" class="btn btnPrimary">Gerar Lista</button>
-          <button id="btnExport" class="btn btnGhost">Exportar HUB (CSV)</button>
+          <button id="btnExport" class="btn btnGhost">Exportar (CSV)</button>
         </div>
       </div>
 
@@ -202,30 +208,22 @@ function renderQualificacao() {
           <label><input type="checkbox" id="stFm" ${state.statusPlanilha.FINALIZADOM?"checked":""}/> FinalizadoM</label>
           <label><input type="checkbox" id="stF" ${state.statusPlanilha.FINALIZADO?"checked":""}/> Finalizado</label>
         </div>
-
-        <div class="checkRow">
-          <div class="muted small"><b>Etapa (HUB):</b></div>
-          <label><input type="checkbox" id="hbN" ${state.etapaHub.NOVO?"checked":""}/> Novo</label>
-          <label><input type="checkbox" id="hbA" ${state.etapaHub.AQUECIDO?"checked":""}/> Aquecido</label>
-          <label><input type="checkbox" id="hbE" ${state.etapaHub.ENVIADO?"checked":""}/> Enviado</label>
-          <label><input type="checkbox" id="hbD" ${state.etapaHub.DESCARTADO?"checked":""}/> Descartado</label>
-        </div>
       </div>
 
       <div class="hSep"></div>
 
       <div class="row" style="align-items:flex-end;">
-        <div class="ctrl" style="min-width:220px;">
-          <label>Lead antigo (>= dias)</label>
-          <select id="selAntigo" class="select">
-            ${["TODOS","30","60","90","180","365"].map(v => `<option value="${v}" ${state.leadAntigoDias===v?"selected":""}>${v==="TODOS"?"Todos":v}</option>`).join("")}
+        <div class="ctrl" style="min-width:210px;">
+          <label>Recência (cadastro)</label>
+          <select id="selRecencia" class="select">
+            ${RECENCY_OPTIONS.map(o => `<option value="${o.key}" ${state.recenciaSelecionada===o.key?"selected":""}>${o.label}</option>`).join("")}
           </select>
         </div>
 
-        <div class="ctrl" style="min-width:220px;">
-          <label>Agend.</label>
-          <select id="selAg" class="select">
-            ${["TODOS","0","1","2","3","4","5"].map(v => `<option value="${v}" ${state.agendFiltro===v?"selected":""}>${v==="TODOS"?"Todos":v}</option>`).join("")}
+        <div class="ctrl" style="min-width:210px;">
+          <label>Agendamentos (faixa)</label>
+          <select id="selAgFaixa" class="select">
+            ${AGEND_BUCKETS.map(o => `<option value="${o.key}" ${state.agendBucket===o.key?"selected":""}>${o.label}</option>`).join("")}
           </select>
         </div>
 
@@ -233,6 +231,22 @@ function renderQualificacao() {
           <label>Buscar (CPF/Nome)</label>
           <input id="inpBusca" class="input" placeholder="Digite CPF ou nome..." value="${escapeAttr(state.busca)}" />
         </div>
+      </div>
+    </div>
+
+    <div class="hSep"></div>
+
+    <div class="card">
+      <div class="rowBetween">
+        <h3 style="margin:0;">Sugestão IA (recomendação, você decide)</h3>
+        <div class="muted small">Baseada no histórico de <b>FinalizadoM</b> (virou cliente)</div>
+      </div>
+
+      <div class="hSep"></div>
+
+      <div class="sugGrid">
+        ${renderSuggestionBox("Fechar rápido (novos 0–30)", "quick")}
+        ${renderSuggestionBox("Missão HUB (antigos 90+)", "hub")}
       </div>
     </div>
 
@@ -266,69 +280,111 @@ function renderQualificacao() {
               <th>Marca</th>
               <th>Vendedor</th>
               <th>Data Cad.</th>
+              <th>Dias</th>
               <th>Agend.</th>
               <th>Status</th>
-              <th>Etapa HUB</th>
               ${ENABLE_SCORE_IA ? "<th>Score IA</th>" : ""}
               <th>Contato</th>
-              <th>Ações</th>
-              <th>Nota HUB</th>
             </tr>
           </thead>
           <tbody id="tbody">
-            <tr><td colspan="${ENABLE_SCORE_IA ? 15 : 14}" class="muted">Clique em <b>Gerar Lista</b>.</td></tr>
+            <tr><td colspan="${ENABLE_SCORE_IA ? 13 : 12}" class="muted">Clique em <b>Gerar Lista</b>.</td></tr>
           </tbody>
         </table>
       </div>
     </div>
   `;
 
+  // drag
   renderDrag();
 
   // binds
-  $("#selVendedor").addEventListener("change", (e) => {
-    state.vendedorSelecionado = e.target.value || "TODOS";
-  });
+  $("#selVendedor").addEventListener("change", (e) => (state.vendedorSelecionado = e.target.value || "TODOS"));
+  $("#selMarca").addEventListener("change", (e) => (state.marcaSelecionada = e.target.value || "AMBOS"));
+  $("#selRecencia").addEventListener("change", (e) => (state.recenciaSelecionada = e.target.value || "TODOS"));
+  $("#selAgFaixa").addEventListener("change", (e) => (state.agendBucket = e.target.value || "TODOS"));
+  $("#inpBusca").addEventListener("input", (e) => (state.busca = e.target.value || ""));
 
-  $("#selMarca").addEventListener("change", (e) => {
-    state.marcaSelecionada = e.target.value || "AMBOS";
-  });
-
-  $("#selAntigo").addEventListener("change", (e) => {
-    state.leadAntigoDias = e.target.value || "TODOS";
-  });
-
-  $("#selAg").addEventListener("change", (e) => {
-    state.agendFiltro = e.target.value || "TODOS";
-  });
-
-  $("#inpBusca").addEventListener("input", (e) => {
-    state.busca = e.target.value || "";
-  });
-
-  // status
   $("#stAg").addEventListener("change", (e) => (state.statusPlanilha.AGENDADO = e.target.checked));
   $("#stFm").addEventListener("change", (e) => (state.statusPlanilha.FINALIZADOM = e.target.checked));
   $("#stF").addEventListener("change", (e) => (state.statusPlanilha.FINALIZADO = e.target.checked));
-
-  // hub
-  $("#hbN").addEventListener("change", (e) => (state.etapaHub.NOVO = e.target.checked));
-  $("#hbA").addEventListener("change", (e) => (state.etapaHub.AQUECIDO = e.target.checked));
-  $("#hbE").addEventListener("change", (e) => (state.etapaHub.ENVIADO = e.target.checked));
-  $("#hbD").addEventListener("change", (e) => (state.etapaHub.DESCARTADO = e.target.checked));
 
   $("#btnGerar").addEventListener("click", gerarLista);
   $("#btnRecarregar").addEventListener("click", async () => {
     await boot();
     renderRoute();
   });
-
   $("#btnExport").addEventListener("click", exportarListaCSV);
+
+  // sugestão aplicar
+  $("#btnApplyQuick")?.addEventListener("click", () => applySuggestion(state.sugestoes.quick));
+  $("#btnApplyHub")?.addEventListener("click", () => applySuggestion(state.sugestoes.hub));
 }
 
-/* ------------------------------
-   DRAG & DROP PRIORIDADE
--------------------------------- */
+/* =========================
+   Sugestões IA (render)
+========================= */
+function renderSuggestionBox(title, kind) {
+  const sug = state.sugestoes[kind];
+  if (!sug) {
+    return `
+      <div class="sugBox">
+        <div class="sugTitle">${escapeHtml(title)}</div>
+        <div class="muted small">Sem dados suficientes ainda para sugerir.</div>
+      </div>
+    `;
+  }
+
+  const btnId = kind === "quick" ? "btnApplyQuick" : "btnApplyHub";
+
+  return `
+    <div class="sugBox">
+      <div class="rowBetween">
+        <div class="sugTitle">${escapeHtml(title)}</div>
+        <button id="${btnId}" class="btn btnGhost btnTiny">Aplicar</button>
+      </div>
+
+      <div class="sugLine">
+        <b>Combo:</b>
+        ${escapeHtml(sug.comboText)}
+      </div>
+
+      <div class="sugMeta">
+        <span class="badge badgeBlue">Conv: <b>${fmtPct(sug.conv)}</b></span>
+        <span class="badge badgeGreen">Lift: <b>${fmtX(sug.lift)}</b></span>
+        <span class="badge badgeAmber">n: <b>${sug.n}</b></span>
+      </div>
+
+      <div class="muted small" style="margin-top:8px;">
+        (Base: mesma recência, compara com conv. geral daquele universo)
+      </div>
+    </div>
+  `;
+}
+
+function applySuggestion(sug) {
+  if (!sug) return;
+
+  // aplica nos filtros (usuário ainda pode mudar)
+  state.marcaSelecionada = sug.marcaKey || "AMBOS";
+  state.recenciaSelecionada = sug.recenciaKey || "TODOS";
+  state.agendBucket = sug.agendKey || "TODOS";
+
+  // aplica curso e mídia via busca (mais simples) ou filtro futuro:
+  // aqui usamos busca vazia e deixamos aparecer pelo sort; MAS vamos filtrar pela combinação no gerarLista com "travamento" opcional:
+  // para manter mínimo de mudanças, aplicamos "busca" vazia e guardamos "comboLock".
+  state._comboLock = { curso: sug.curso || "", midia: sug.midia || "" };
+
+  // re-render topo com selects aplicados
+  renderQualificacao();
+
+  // já gera lista
+  gerarLista();
+}
+
+/* =========================
+   Drag & Drop prioridade
+========================= */
 function renderDrag() {
   const drag = $("#drag");
   drag.innerHTML = "";
@@ -380,11 +436,12 @@ function getDragAfterElement(container, y) {
   ).element;
 }
 
-/* ------------------------------
-   GERAR LISTA + TABELA
--------------------------------- */
+/* =========================
+   Gerar lista + ordenar
+========================= */
 function gerarLista() {
-  let lista = [...state.leads];
+  // comece com tudo
+  let lista = [...state.all];
 
   // filtro marca
   if (state.marcaSelecionada !== "AMBOS") {
@@ -396,7 +453,17 @@ function gerarLista() {
     lista = lista.filter((l) => (l.VENDEDOR || "").trim() === state.vendedorSelecionado);
   }
 
-  // filtro status (planilha)
+  // filtro recência
+  if (state.recenciaSelecionada !== "TODOS") {
+    lista = lista.filter((l) => recencyKeyFromAge(l.AGE_DAYS) === state.recenciaSelecionada);
+  }
+
+  // filtro agend faixa
+  if (state.agendBucket !== "TODOS") {
+    lista = lista.filter((l) => agendKeyFromN(toInt(l.TOTAL_AGENDAMENTOS)) === state.agendBucket);
+  }
+
+  // filtro status planilha
   lista = lista.filter((l) => {
     const s = normalizeStatus(l.STATUS_PENDENTE);
     if (s === "AGENDADO") return !!state.statusPlanilha.AGENDADO;
@@ -404,28 +471,6 @@ function gerarLista() {
     if (s === "FINALIZADO") return !!state.statusPlanilha.FINALIZADO;
     return true;
   });
-
-  // filtro lead antigo (>= dias)
-  if (state.leadAntigoDias !== "TODOS") {
-    const dias = parseInt(state.leadAntigoDias, 10);
-    if (Number.isFinite(dias)) {
-      const now = Date.now();
-      lista = lista.filter((l) => {
-        const t = toDate(l.DATA_CADASTRO);
-        if (!t) return false;
-        const ageDays = Math.floor((now - t) / 86400000);
-        return ageDays >= dias;
-      });
-    }
-  }
-
-  // filtro agendamentos
-  if (state.agendFiltro !== "TODOS") {
-    const n = parseInt(state.agendFiltro, 10);
-    if (Number.isFinite(n)) {
-      lista = lista.filter((l) => toInt(l.TOTAL_AGENDAMENTOS) === n);
-    }
-  }
 
   // busca
   const q = (state.busca || "").trim();
@@ -441,26 +486,38 @@ function gerarLista() {
     });
   }
 
-  // ordenação (Score IA sempre primeiro, depois drag)
+  // se veio de sugestão aplicada, travamos combo (somente para esta geração)
+  if (state._comboLock) {
+    const { curso, midia } = state._comboLock;
+    if (curso) lista = lista.filter((l) => normalizeText(l.CURSO) === normalizeText(curso));
+    if (midia) lista = lista.filter((l) => normalizeText(l.MIDIA) === normalizeText(midia));
+    // limpa depois de aplicar uma vez (usuário continua livre)
+    state._comboLock = null;
+  }
+
+  // ordenação (Score IA sempre primeiro)
   lista.sort(makeMultiComparatorWithScore(state.prioridade));
 
   renderTabela(lista);
 
-  $("#resultadoInfo").textContent = `Linhas: ${lista.length} • Marca: ${
-    state.marcaSelecionada === "AMBOS" ? "Ambos" : (state.marcaSelecionada === "TECNICO" ? "Técnico" : "Profissionalizante")
-  } • Prioridade: ScoreIA > ${state.prioridade.join(" > ")}`;
+  $("#resultadoInfo").textContent = `Linhas: ${lista.length} • Filtros ativos: ${
+    [
+      state.marcaSelecionada !== "AMBOS" ? `Marca=${state.marcaSelecionada}` : "",
+      state.vendedorSelecionado !== "TODOS" ? `Vendedor=${state.vendedorSelecionado}` : "",
+      state.recenciaSelecionada !== "TODOS" ? `Recência=${state.recenciaSelecionada}` : "",
+      state.agendBucket !== "TODOS" ? `Agend=${state.agendBucket}` : "",
+    ].filter(Boolean).join(" • ") || "nenhum"
+  } • Ordem: ScoreIA > ${state.prioridade.join(" > ")}`;
 }
 
 function makeMultiComparatorWithScore(keys) {
   return (a, b) => {
-    // score desc (fixo)
     if (ENABLE_SCORE_IA) {
       const as = Number.isFinite(a.SCORE_IA) ? a.SCORE_IA : -1;
       const bs = Number.isFinite(b.SCORE_IA) ? b.SCORE_IA : -1;
       if (bs !== as) return bs - as;
     }
 
-    // demais por prioridade
     for (const k of keys) {
       const dir = SORT_DIR[k] || "asc";
       const av = a[k];
@@ -487,55 +544,186 @@ function renderTabela(lista) {
   const tbody = $("#tbody");
 
   if (!lista.length) {
-    tbody.innerHTML = `<tr><td colspan="${ENABLE_SCORE_IA ? 15 : 14}" class="muted">Nenhum lead para este filtro.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${ENABLE_SCORE_IA ? 13 : 12}" class="muted">Nenhum lead para este filtro.</td></tr>`;
     return;
   }
 
-  tbody.innerHTML = lista
-    .map((l, i) => {
-      const wa = buildWhatsLink(l);
-      const status = normalizeStatus(l.STATUS_PENDENTE);
-      const marcaLabel = normalizeMarcaLabel(l.MARCA);
+  tbody.innerHTML = lista.map((l, i) => {
+    const wa = buildWhatsLink(l);
+    const status = normalizeStatus(l.STATUS_PENDENTE);
+    const marcaLabel = normalizeMarcaLabel(l.MARCA);
+    const days = Number.isFinite(l.AGE_DAYS) ? l.AGE_DAYS : "";
 
-      return `
-        <tr>
-          <td>${i + 1}</td>
-          <td>${escapeHtml(l.NOME || "")}</td>
-          <td>${escapeHtml(l.CPF || "")}</td>
-          <td>${escapeHtml(l.CURSO || "")}</td>
-          <td>${escapeHtml(l.MIDIA || "")}</td>
-          <td>${escapeHtml(marcaLabel || "")}</td>
-          <td>${escapeHtml(l.VENDEDOR || "")}</td>
-          <td>${escapeHtml(l.DATA_CADASTRO || "")}</td>
-          <td>${escapeHtml(String(toInt(l.TOTAL_AGENDAMENTOS)))}</td>
-          <td>${escapeHtml(status)}</td>
-          <td>${escapeHtml(l.ETAPA_HUB || "Novo")}</td>
-          ${ENABLE_SCORE_IA ? `<td>${l.SCORE_IA != null ? Number(l.SCORE_IA).toFixed(3) : ""}</td>` : ""}
-          <td>${wa ? `<a href="${wa}" target="_blank">Whats</a>` : "-"}</td>
-          <td>
-            <button class="btn btnGhost" onclick="copiar('${escapeAttr(l.CPF || "")}')">Copiar CPF</button>
-          </td>
-          <td>${escapeHtml(l.NOTA_HUB || "")}</td>
-        </tr>
-      `;
-    })
-    .join("");
+    return `
+      <tr>
+        <td>${i + 1}</td>
+        <td>${escapeHtml(l.NOME || "")}</td>
+        <td>${escapeHtml(l.CPF || "")}</td>
+        <td>${escapeHtml(l.CURSO || "")}</td>
+        <td>${escapeHtml(l.MIDIA || "")}</td>
+        <td>${escapeHtml(marcaLabel || "")}</td>
+        <td>${escapeHtml(l.VENDEDOR || "")}</td>
+        <td>${escapeHtml(l.DATA_CADASTRO || "")}</td>
+        <td>${escapeHtml(String(days))}</td>
+        <td>${escapeHtml(String(toInt(l.TOTAL_AGENDAMENTOS)))}</td>
+        <td>${escapeHtml(status)}</td>
+        ${ENABLE_SCORE_IA ? `<td>${l.SCORE_IA != null ? Number(l.SCORE_IA).toFixed(3) : ""}</td>` : ""}
+        <td>${wa ? `<a href="${wa}" target="_blank">Whats</a>` : "-"}</td>
+      </tr>
+    `;
+  }).join("");
 }
 
-/* Export simples do que está na tela (última lista gerada) */
+/* =========================
+   Sugestão IA — cálculo
+   - 2 modos fixos:
+     quick: recência 0–30
+     hub: recência 90+
+   - Busca melhor combo: (marca opcional) + curso + mídia + agendFaixa
+   - Métrica: lift * log10(n+1)
+   - conv_suave = (mat+1)/(n+2)
+========================= */
+function computeSuggestions(all) {
+  const out = { quick: null, hub: null };
+
+  // calcula uma vez buckets necessários
+  const enriched = all.map(l => ({
+    ...l,
+    REC: recencyKeyFromAge(l.AGE_DAYS),
+    AGK: agendKeyFromN(toInt(l.TOTAL_AGENDAMENTOS)),
+    MK: normalizeMarcaKey(l.MARCA), // TECNICO/PROFISSIONALIZANTE/...
+    COURSE: normalizeText(l.CURSO),
+    MEDIA: normalizeText(l.MIDIA),
+    ISMAT: isMatriculado(l),
+  }));
+
+  out.quick = bestComboForRecency(enriched, "0_30");
+  out.hub = bestComboForRecency(enriched, "90P");
+
+  return out;
+}
+
+function bestComboForRecency(rows, recKey) {
+  // universo fixo: mesma recência (comparação justa)
+  const universe = rows.filter(r => r.REC === recKey && r.COURSE && r.MEDIA);
+  const nU = universe.length;
+  if (nU < 80) return null; // pouco dado
+
+  const matU = universe.reduce((acc, r) => acc + (r.ISMAT ? 1 : 0), 0);
+  const convU = (matU + 1) / (nU + 2);
+
+  // candidatos: curso|midia|agendFaixa|marca (marca opcional entra se melhorar)
+  const map = new Map();
+
+  for (const r of universe) {
+    // primeiro sem marca (AMBOS) e também com marca específica
+    const keys = [
+      `AMBOS|${r.COURSE}|${r.MEDIA}|${r.AGK}`,
+      `${r.MK}|${r.COURSE}|${r.MEDIA}|${r.AGK}`,
+    ];
+
+    for (const k of keys) {
+      const cur = map.get(k) || { n: 0, m: 0 };
+      cur.n += 1;
+      cur.m += (r.ISMAT ? 1 : 0);
+      map.set(k, cur);
+    }
+  }
+
+  // escolhe melhor com mínimo de amostra
+  let best = null;
+
+  for (const [k, v] of map.entries()) {
+    const n = v.n;
+    if (n < 30) continue; // evita “milagre”
+    const conv = (v.m + 1) / (n + 2);   // suave
+    const lift = conv / convU;
+
+    // bônus leve para baixa energia (0–1 agend)
+    const parts = k.split("|");
+    const agk = parts[3];
+    const bonus = agk === "0_1" ? 1.08 : agk === "2_3" ? 1.00 : agk === "4P" ? 0.92 : 1.00;
+
+    const score = lift * Math.log10(n + 1) * bonus;
+
+    if (!best || score > best.score) {
+      best = { k, n, conv, lift, score };
+    }
+  }
+
+  if (!best) return null;
+
+  const [marcaKey, courseNorm, mediaNorm, agendKey] = best.k.split("|");
+
+  // reconstrói texto amigável (usa primeira ocorrência para recuperar label original)
+  const pickCourse = firstLabel(universe, "CURSO", courseNorm) || courseNorm;
+  const pickMedia = firstLabel(universe, "MIDIA", mediaNorm) || mediaNorm;
+
+  const comboText = [
+    `Recência: ${RECENCY_OPTIONS.find(o=>o.key===recKey)?.label || recKey}`,
+    marcaKey !== "AMBOS" ? `Marca: ${marcaKey === "TECNICO" ? "Técnico" : "Profissionalizante"}` : `Marca: Ambos`,
+    `Curso: ${pickCourse}`,
+    `Mídia: ${pickMedia}`,
+    `Agend.: ${AGEND_BUCKETS.find(o=>o.key===agendKey)?.label || agendKey}`
+  ].join(" • ");
+
+  return {
+    recenciaKey: recKey,
+    marcaKey,
+    curso: pickCourse,
+    midia: pickMedia,
+    agendKey,
+    n: best.n,
+    conv: best.conv,
+    lift: best.lift,
+    comboText
+  };
+}
+
+function firstLabel(universe, field, normValue) {
+  // tenta pegar o label original de algum registro que bata com o normalizado
+  for (const r of universe) {
+    if (field === "CURSO" && normalizeText(r.CURSO) === normValue) return r.CURSO;
+    if (field === "MIDIA" && normalizeText(r.MIDIA) === normValue) return r.MIDIA;
+  }
+  return "";
+}
+
+/* =========================
+   Score IA (ranking interno)
+   - baseado no par (curso|midia) e penalização por tentativas
+========================= */
+function computeScoreIA(allLeads) {
+  const total = new Map();
+  const mat = new Map();
+
+  for (const l of allLeads) {
+    const key = `${normalizeText(l.MIDIA)}|${normalizeText(l.CURSO)}`;
+    total.set(key, (total.get(key) || 0) + 1);
+    if (isMatriculado(l)) mat.set(key, (mat.get(key) || 0) + 1);
+  }
+
+  for (const l of allLeads) {
+    const key = `${normalizeText(l.MIDIA)}|${normalizeText(l.CURSO)}`;
+    const taxa = (mat.get(key) || 0) / Math.max(1, total.get(key) || 0);
+    const ag = Math.max(0, toInt(l.TOTAL_AGENDAMENTOS));
+    const penal = 1 / (1 + ag);
+    l.SCORE_IA = taxa * 0.75 + penal * 0.25;
+  }
+}
+
+/* =========================
+   Export CSV (lista atual)
+========================= */
 function exportarListaCSV() {
-  const rows = [];
-  const headers = ["CPF","NOME","MARCA","CURSO","MIDIA","VENDEDOR","DATA_CADASTRO","TOTAL_AGENDAMENTOS","STATUS_PENDENTE","SCORE_IA"];
-  rows.push(headers.join(","));
+  // Reutiliza os filtros atuais para recriar lista e exportar
+  let lista = [...state.all];
 
-  // pega o que está renderizado no tbody (última lista)
-  const tr = [...document.querySelectorAll("#tbody tr")];
-  if (!tr.length) return;
-
-  // melhor: recriar a lista (mesmos filtros) e exportar
-  let lista = [...state.leads];
   if (state.marcaSelecionada !== "AMBOS") lista = lista.filter((l) => normalizeMarcaKey(l.MARCA) === state.marcaSelecionada);
   if (state.vendedorSelecionado !== "TODOS") lista = lista.filter((l) => (l.VENDEDOR || "").trim() === state.vendedorSelecionado);
+  if (state.recenciaSelecionada !== "TODOS") lista = lista.filter((l) => recencyKeyFromAge(l.AGE_DAYS) === state.recenciaSelecionada);
+  if (state.agendBucket !== "TODOS") lista = lista.filter((l) => agendKeyFromN(toInt(l.TOTAL_AGENDAMENTOS)) === state.agendBucket);
+
   lista = lista.filter((l) => {
     const s = normalizeStatus(l.STATUS_PENDENTE);
     if (s === "AGENDADO") return !!state.statusPlanilha.AGENDADO;
@@ -543,22 +731,7 @@ function exportarListaCSV() {
     if (s === "FINALIZADO") return !!state.statusPlanilha.FINALIZADO;
     return true;
   });
-  if (state.leadAntigoDias !== "TODOS") {
-    const dias = parseInt(state.leadAntigoDias, 10);
-    if (Number.isFinite(dias)) {
-      const now = Date.now();
-      lista = lista.filter((l) => {
-        const t = toDate(l.DATA_CADASTRO);
-        if (!t) return false;
-        const ageDays = Math.floor((now - t) / 86400000);
-        return ageDays >= dias;
-      });
-    }
-  }
-  if (state.agendFiltro !== "TODOS") {
-    const n = parseInt(state.agendFiltro, 10);
-    if (Number.isFinite(n)) lista = lista.filter((l) => toInt(l.TOTAL_AGENDAMENTOS) === n);
-  }
+
   const q = (state.busca || "").trim();
   if (q) {
     const qDigits = q.replace(/\D/g, "");
@@ -571,7 +744,11 @@ function exportarListaCSV() {
       return false;
     });
   }
+
   lista.sort(makeMultiComparatorWithScore(state.prioridade));
+
+  const headers = ["CPF","NOME","MARCA","CURSO","MIDIA","VENDEDOR","DATA_CADASTRO","IDADE_DIAS","TOTAL_AGENDAMENTOS","STATUS_PENDENTE","SCORE_IA"];
+  const rows = [headers.join(",")];
 
   for (const l of lista) {
     rows.push([
@@ -582,6 +759,7 @@ function exportarListaCSV() {
       csvCell(l.MIDIA),
       csvCell(l.VENDEDOR),
       csvCell(l.DATA_CADASTRO),
+      csvCell(String(l.AGE_DAYS ?? "")),
       csvCell(String(toInt(l.TOTAL_AGENDAMENTOS))),
       csvCell(normalizeStatus(l.STATUS_PENDENTE)),
       csvCell(l.SCORE_IA != null ? String(Number(l.SCORE_IA).toFixed(3)) : "")
@@ -603,9 +781,9 @@ function csvCell(v) {
   return s;
 }
 
-/* ------------------------------
-   CSV FETCH + PARSE
--------------------------------- */
+/* =========================
+   CSV fetch + parse
+========================= */
 async function fetchCsvNoCache(url) {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error("Erro ao carregar CSV. Confirme se a planilha está pública e o gid é da aba correta.");
@@ -636,34 +814,15 @@ function parseCSV(text) {
       continue;
     }
 
-    if (c === '"') {
-      inQuotes = true;
-      continue;
-    }
-
-    if (c === ",") {
-      cur.push(field);
-      field = "";
-      continue;
-    }
-
-    if (c === "\n") {
-      cur.push(field);
-      field = "";
-      rows.push(cur);
-      cur = [];
-      continue;
-    }
-
+    if (c === '"') { inQuotes = true; continue; }
+    if (c === ",") { cur.push(field); field = ""; continue; }
+    if (c === "\n") { cur.push(field); field = ""; rows.push(cur); cur = []; continue; }
     if (c === "\r") continue;
 
     field += c;
   }
 
-  if (field.length || cur.length) {
-    cur.push(field);
-    rows.push(cur);
-  }
+  if (field.length || cur.length) { cur.push(field); rows.push(cur); }
 
   const clean = rows.filter((r) => r.some((x) => String(x || "").trim().length));
   if (!clean.length) return [];
@@ -671,18 +830,14 @@ function parseCSV(text) {
   const headers = clean[0].map((h) => String(h || "").trim());
   return clean.slice(1).map((r) => {
     const obj = {};
-    headers.forEach((h, idx) => {
-      obj[h] = r[idx] != null ? String(r[idx]) : "";
-    });
+    headers.forEach((h, idx) => { obj[h] = r[idx] != null ? String(r[idx]) : ""; });
     return obj;
   });
 }
 
 function normalizeRowKeys(row) {
   const out = { __raw: row };
-  Object.keys(row).forEach((k) => {
-    out[normalizeKey(k)] = row[k];
-  });
+  Object.keys(row).forEach((k) => { out[normalizeKey(k)] = row[k]; });
   return out;
 }
 
@@ -695,9 +850,9 @@ function normalizeKey(k) {
     .replace(/\s+/g, "_");
 }
 
-/* ------------------------------
-   NORMALIZAÇÃO
--------------------------------- */
+/* =========================
+   Normalize lead
+========================= */
 function normalizeLead(r, idx) {
   const get = (...keys) => {
     for (const k of keys) {
@@ -712,45 +867,53 @@ function normalizeLead(r, idx) {
     return "";
   };
 
+  const dataCad = get("DATA_CADASTRO");
+  const age = computeAgeDays(dataCad);
+
   const lead = {
     ID: idx + 1,
     MARCA: get("MARCA"),
     NOME: get("NOME"),
     CPF: get("CPF"),
     VENDEDOR: get("VENDEDOR"),
-    DATA_CADASTRO: get("DATA_CADASTRO"),
+    DATA_CADASTRO: dataCad,
     MIDIA: get("MIDIA", "MÍDIA"),
     CURSO: get("CURSO"),
     TOTAL_AGENDAMENTOS: toInt(get("TOTAL_AGENDAMENTOS")),
     STATUS_PENDENTE: get("STATUS_PENDENTE"),
-    ETAPA_HUB: "Novo",
-    NOTA_HUB: "",
     SCORE_IA: null,
+    AGE_DAYS: age,
     FONE: get("FONE"),
     FONE2: get("FONE2"),
     FONE3: get("FONE3"),
   };
 
-  DEFAULT_PRIORIDADE.forEach((k) => {
-    if (!(k in lead)) lead[k] = "";
-  });
+  DEFAULT_PRIORIDADE.forEach((k) => { if (!(k in lead)) lead[k] = ""; });
 
   return lead;
 }
 
+/* =========================
+   Rules / helpers
+========================= */
 function normalizeStatus(s) {
-  return String(s || "")
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, "");
+  return String(s || "").trim().toUpperCase().replace(/\s+/g, "");
 }
 
-function normalizeMarcaKey(s) {
-  const n = String(s || "")
+function isMatriculado(l) {
+  return normalizeStatus(l.STATUS_PENDENTE) === "FINALIZADOM";
+}
+
+function normalizeText(s) {
+  return String(s || "")
     .trim()
     .toUpperCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
+}
+
+function normalizeMarcaKey(s) {
+  const n = normalizeText(s);
   if (n.startsWith("TEC")) return "TECNICO";
   if (n.startsWith("PRO")) return "PROFISSIONALIZANTE";
   return n || "AMBOS";
@@ -763,12 +926,6 @@ function normalizeMarcaLabel(s) {
   return String(s || "").trim();
 }
 
-function isMatriculado(l) {
-  // Na sua regra atual, FinalizadoM = matriculado
-  const s = normalizeStatus(l.STATUS_PENDENTE);
-  return s === "FINALIZADOM";
-}
-
 function buildWhatsLink(l) {
   const f = String(l.FONE || "").trim() || String(l.FONE2 || "").trim() || String(l.FONE3 || "").trim();
   const p = String(f || "").replace(/\D/g, "");
@@ -777,36 +934,78 @@ function buildWhatsLink(l) {
   return `https://wa.me/${full}`;
 }
 
-function copiar(txt) {
-  if (!txt) return;
-  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(txt);
+function toInt(v) {
+  const n = parseInt(String(v || "").replace(/[^\d-]/g, ""), 10);
+  return Number.isFinite(n) ? n : 0;
 }
 
-/* ------------------------------
-   SCORE IA (conversão mídia/curso)
--------------------------------- */
-function computeScoreIA(allLeads) {
-  const total = new Map();
-  const mat = new Map();
+function toDate(v) {
+  const s = String(v || "").trim();
+  if (!s) return 0;
 
-  for (const l of allLeads) {
-    const key = `${(l.MIDIA || "").trim()}|${(l.CURSO || "").trim()}`;
-    total.set(key, (total.get(key) || 0) + 1);
-    if (isMatriculado(l)) mat.set(key, (mat.get(key) || 0) + 1);
+  const iso = Date.parse(s);
+  if (!Number.isNaN(iso)) return iso;
+
+  // dd/mm/yyyy (com ou sem hora)
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m) {
+    const dd = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10) - 1;
+    let yy = parseInt(m[3], 10);
+    if (yy < 100) yy += 2000;
+    const hh = parseInt(m[4] || "0", 10);
+    const mi = parseInt(m[5] || "0", 10);
+    const ss = parseInt(m[6] || "0", 10);
+    return new Date(yy, mm, dd, hh, mi, ss).getTime();
   }
 
-  for (const l of allLeads) {
-    const key = `${(l.MIDIA || "").trim()}|${(l.CURSO || "").trim()}`;
-    const taxa = (mat.get(key) || 0) / Math.max(1, total.get(key) || 0);
-    const ag = Math.max(0, toInt(l.TOTAL_AGENDAMENTOS));
-    const penal = 1 / (1 + ag);
-    l.SCORE_IA = taxa * 0.7 + penal * 0.3;
-  }
+  return 0;
 }
 
-/* ------------------------------
-   HELPERS
--------------------------------- */
+function computeAgeDays(dataCadastro) {
+  const t = toDate(dataCadastro);
+  if (!t) return null;
+  const now = Date.now();
+  const d = Math.floor((now - t) / 86400000);
+  return d >= 0 && d < 20000 ? d : null;
+}
+
+function recencyKeyFromAge(ageDays) {
+  if (ageDays == null) return "TODOS";
+  if (ageDays <= 30) return "0_30";
+  if (ageDays <= 60) return "31_60";
+  if (ageDays <= 90) return "61_90";
+  return "90P";
+}
+
+function agendKeyFromN(n) {
+  if (!Number.isFinite(n)) return "TODOS";
+  if (n <= 1) return "0_1";
+  if (n <= 3) return "2_3";
+  return "4P";
+}
+
+function unique(arr) {
+  return [...new Set(arr)];
+}
+
+function formatDateTime(d) {
+  try { return d.toLocaleString("pt-BR"); } catch { return String(d); }
+}
+
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function escapeAttr(s) {
+  return escapeHtml(s).replaceAll('"', "&quot;");
+}
+
 function renderLoading(msg) {
   const view = $("#view");
   if (!view) return;
@@ -834,54 +1033,11 @@ function renderError(err) {
   });
 }
 
-function toInt(v) {
-  const n = parseInt(String(v || "").replace(/[^\d-]/g, ""), 10);
-  return Number.isFinite(n) ? n : 0;
+function fmtPct(x) {
+  const v = Number(x || 0);
+  return (v * 100).toFixed(1) + "%";
 }
-
-function toDate(v) {
-  const s = String(v || "").trim();
-  if (!s) return 0;
-
-  const iso = Date.parse(s);
-  if (!Number.isNaN(iso)) return iso;
-
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
-  if (m) {
-    const dd = parseInt(m[1], 10);
-    const mm = parseInt(m[2], 10) - 1;
-    let yy = parseInt(m[3], 10);
-    if (yy < 100) yy += 2000;
-    const hh = parseInt(m[4] || "0", 10);
-    const mi = parseInt(m[5] || "0", 10);
-    const ss = parseInt(m[6] || "0", 10);
-    return new Date(yy, mm, dd, hh, mi, ss).getTime();
-  }
-
-  return 0;
-}
-
-function unique(arr) {
-  return [...new Set(arr)];
-}
-
-function formatDateTime(d) {
-  try {
-    return d.toLocaleString("pt-BR");
-  } catch {
-    return String(d);
-  }
-}
-
-function escapeHtml(s) {
-  return String(s ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function escapeAttr(s) {
-  return escapeHtml(s).replaceAll('"', "&quot;");
+function fmtX(x) {
+  const v = Number(x || 0);
+  return v.toFixed(2) + "x";
 }
