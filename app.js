@@ -1,20 +1,19 @@
 /* ================================
    GT ARIA — Qualificação (Google Sheets CSV)
-   - Filtros: Marca, Vendedor, Recência (DATA_CADASTRO), Status, Agend, Busca
-   - Sugestão IA: recomenda combinações (sem impor)
-   - Conversão: STATUS_PENDENTE == "FinalizadoM" (virou cliente)
+   - KPIs EXECUTIVOS seguem filtros
+   - Recência calculada por DATA_CADASTRO
+   - Tabela ordenável por clique no cabeçalho
+   - Janela "tempo para trás" (últimos X dias / custom)
+   - Matriculou: STATUS_PENDENTE == FinalizadoM
 =================================== */
 
-/** Google Sheets (CSV via export) */
+/** ✅ ATENÇÃO: confirme sempre o gid da aba "data" */
 const SHEET_CSV_URL =
   "https://docs.google.com/spreadsheets/d/1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI/export?format=csv&gid=1731723852";
 
-/** Score simples por conversão (para ordenar) */
 const ENABLE_SCORE_IA = true;
 
-/** Ordenação padrão (arrastável) */
 const DEFAULT_PRIORIDADE = ["VENDEDOR", "DATA_CADASTRO", "TOTAL_AGENDAMENTOS", "MIDIA", "CURSO"];
-
 const SORT_DIR = {
   VENDEDOR: "asc",
   DATA_CADASTRO: "desc",
@@ -38,34 +37,55 @@ const AGEND_BUCKETS = [
   { key: "4P", label: "4+" },
 ];
 
+const WINDOW_OPTIONS = [
+  { key: "TODOS", label: "Todos" },
+  { key: "30", label: "Últimos 30 dias" },
+  { key: "60", label: "Últimos 60 dias" },
+  { key: "90", label: "Últimos 90 dias" },
+  { key: "180", label: "Últimos 180 dias" },
+  { key: "365", label: "Últimos 365 dias" },
+  { key: "CUSTOM", label: "Personalizado (dias)" },
+];
+
 const state = {
   loading: false,
   error: "",
   lastUpdated: null,
 
   all: [],
-
   vendedores: [],
   marcas: [],
 
-  // filtros topo
   vendedorSelecionado: "TODOS",
   marcaSelecionada: "AMBOS",
+
+  /** recência (faixas 0-30/31-60/...) */
   recenciaSelecionada: "TODOS",
+
+  /** filtro por agendamentos (faixa) */
   agendBucket: "TODOS",
+
+  /** tempo para trás (janela) */
+  janelaKey: "TODOS",
+  janelaDiasCustom: 120,
+
+  /** busca (CPF/NOME) */
   busca: "",
 
-  // status (planilha)
+  /** status da planilha */
   statusPlanilha: { AGENDADO: true, FINALIZADOM: false, FINALIZADO: false },
 
-  // drag
+  /** ordenação por prioridade arrastável */
   prioridade: [...DEFAULT_PRIORIDADE],
 
-  // sugestões IA calculadas
-  sugestoes: {
-    quick: null, // fechamento rápido
-    hub: null,   // missão HUB
-  },
+  /** sugestões */
+  sugestoes: { quick: null, hub: null },
+
+  /** lista atual da tabela */
+  currentList: [],
+
+  /** ordenação manual (clicando no cabeçalho) */
+  tableSort: { key: null, dir: "asc" },
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -101,7 +121,6 @@ async function boot() {
 
     state.all = normalizedRows.map((r, idx) => normalizeLead(r, idx));
 
-    // listas
     state.vendedores = unique(
       state.all.map((l) => (l.VENDEDOR || "").trim()).filter(Boolean)
     ).sort((a, b) => a.localeCompare(b, "pt-BR"));
@@ -110,10 +129,8 @@ async function boot() {
       state.all.map((l) => normalizeMarcaLabel(l.MARCA)).filter(Boolean)
     ).sort((a, b) => a.localeCompare(b, "pt-BR"));
 
-    // score (para ordenação)
     if (ENABLE_SCORE_IA) computeScoreIA(state.all);
 
-    // sugestões IA (recomendação de combinação)
     state.sugestoes = computeSuggestions(state.all);
 
     state.lastUpdated = new Date();
@@ -152,9 +169,6 @@ function renderPlaceholder(title) {
   `;
 }
 
-/* =========================
-   UI: Qualificação
-========================= */
 function renderQualificacao() {
   const view = $("#view");
   if (state.loading) return renderLoading("Carregando…");
@@ -170,8 +184,11 @@ function renderQualificacao() {
         <div>
           <h2 style="margin:0 0 4px 0;">Qualificação de Leads (HUB)</h2>
           <div class="muted small">
-            Base: <b>${totalAll}</b> • Não clientes: <b>${totalNaoMat}</b> • Clientes (FinalizadoM): <b>${totalMat}</b>
+            Base total: <b>${totalAll}</b> • Não clientes: <b>${totalNaoMat}</b> • Clientes (FinalizadoM): <b>${totalMat}</b>
             ${state.lastUpdated ? `• Atualizado: <b>${formatDateTime(state.lastUpdated)}</b>` : ""}
+          </div>
+          <div class="muted small" style="margin-top:6px;">
+            Recência/KPIs usam: <b>DATA_CADASTRO</b>. Matriculou: <b>STATUS_PENDENTE == FinalizadoM</b>.
           </div>
         </div>
 
@@ -214,7 +231,22 @@ function renderQualificacao() {
 
       <div class="row" style="align-items:flex-end;">
         <div class="ctrl" style="min-width:210px;">
-          <label>Recência (cadastro)</label>
+          <label>Janela (tempo para trás)</label>
+          <select id="selJanela" class="select">
+            ${WINDOW_OPTIONS.map(o => `<option value="${o.key}" ${state.janelaKey===o.key?"selected":""}>${o.label}</option>`).join("")}
+          </select>
+        </div>
+
+        <div class="ctrl" style="min-width:180px;">
+          <label>Dias (se personalizado)</label>
+          <input id="inpJanelaDias" class="input" type="number" min="1" step="1"
+            value="${escapeAttr(String(state.janelaDiasCustom || 120))}"
+            ${state.janelaKey==="CUSTOM" ? "" : "disabled"}
+          />
+        </div>
+
+        <div class="ctrl" style="min-width:210px;">
+          <label>Recência (faixa)</label>
           <select id="selRecencia" class="select">
             ${RECENCY_OPTIONS.map(o => `<option value="${o.key}" ${state.recenciaSelecionada===o.key?"selected":""}>${o.label}</option>`).join("")}
           </select>
@@ -253,10 +285,30 @@ function renderQualificacao() {
     <div class="hSep"></div>
 
     <div class="card">
+      <div class="rowBetween">
+        <h3 style="margin:0;">KPIs (seguem filtros atuais)</h3>
+        <div class="muted small" id="kpiNote">Clique em <b>Gerar Lista</b> para calcular.</div>
+      </div>
+
+      <div class="hSep"></div>
+
+      <div id="kpiWrap" class="kpiGrid">
+        ${renderKpiPlaceholder()}
+      </div>
+
+      <div class="muted small" style="margin-top:10px;">
+        Obs.: como KPIs seguem filtros, se você desmarcar <b>FinalizadoM</b>, “matriculados” pode zerar.
+      </div>
+    </div>
+
+    <div class="hSep"></div>
+
+    <div class="card">
       <h3 style="margin:0 0 8px 0;">Prioridade de Ordenação (arraste)</h3>
       <div id="drag" style="max-width:520px;"></div>
       <div class="muted small" style="margin-top:8px;">
-        Score IA é prioridade fixa (primeiro). Depois, sua ordem arrastável.
+        Padrão: Score IA (se ligado) > sua ordem arrastável.
+        <br/>Na tabela, clique no cabeçalho para ordenar manualmente (▲/▼).
       </div>
     </div>
 
@@ -272,18 +324,18 @@ function renderQualificacao() {
         <table id="tbl">
           <thead>
             <tr>
-              <th>#</th>
-              <th>Nome</th>
-              <th>CPF</th>
-              <th>Curso</th>
-              <th>Mídia</th>
-              <th>Marca</th>
-              <th>Vendedor</th>
-              <th>Data Cad.</th>
-              <th>Dias</th>
-              <th>Agend.</th>
-              <th>Status</th>
-              ${ENABLE_SCORE_IA ? "<th>Score IA</th>" : ""}
+              ${renderSortableTh("#", null)}
+              ${renderSortableTh("Nome", "NOME")}
+              ${renderSortableTh("CPF", "CPF")}
+              ${renderSortableTh("Curso", "CURSO")}
+              ${renderSortableTh("Mídia", "MIDIA")}
+              ${renderSortableTh("Marca", "MARCA")}
+              ${renderSortableTh("Vendedor", "VENDEDOR")}
+              ${renderSortableTh("Data Cad.", "DATA_CADASTRO")}
+              ${renderSortableTh("Dias", "AGE_DAYS")}
+              ${renderSortableTh("Agend.", "TOTAL_AGENDAMENTOS")}
+              ${renderSortableTh("Status", "STATUS_PENDENTE")}
+              ${ENABLE_SCORE_IA ? renderSortableTh("Score IA", "SCORE_IA") : ""}
               <th>Contato</th>
             </tr>
           </thead>
@@ -295,15 +347,59 @@ function renderQualificacao() {
     </div>
   `;
 
-  // drag
   renderDrag();
+  bindUI();
+}
 
-  // binds
+/* =========================
+   KPI placeholders
+========================= */
+function renderKpiPlaceholder() {
+  return `
+    <div class="kpi"><div class="kpiTitle">Leads analisados</div><div class="kpiValue">—</div><div class="kpiSub">—</div></div>
+    <div class="kpi"><div class="kpiTitle">Matriculados (FinalizadoM)</div><div class="kpiValue">—</div><div class="kpiSub">—</div></div>
+    <div class="kpi"><div class="kpiTitle">Conversão</div><div class="kpiValue">—</div><div class="kpiSub">—</div></div>
+    <div class="kpi"><div class="kpiTitle">80/20 por recência</div><div class="kpiValue">—</div><div class="kpiSub">—</div></div>
+  `;
+}
+
+/* =========================
+   Table header sortable
+========================= */
+function renderSortableTh(label, key) {
+  if (!key) return `<th>${escapeHtml(label)}</th>`;
+
+  const isActive = state.tableSort.key === key;
+  const icon = isActive ? (state.tableSort.dir === "asc" ? "▲" : "▼") : "";
+  return `
+    <th>
+      <button class="thBtn" data-sortkey="${escapeAttr(key)}" title="Ordenar por ${escapeAttr(label)}">
+        <span>${escapeHtml(label)}</span>
+        <span class="sortIcon">${icon}</span>
+      </button>
+    </th>
+  `;
+}
+
+/* =========================
+   UI bind
+========================= */
+function bindUI() {
   $("#selVendedor").addEventListener("change", (e) => (state.vendedorSelecionado = e.target.value || "TODOS"));
   $("#selMarca").addEventListener("change", (e) => (state.marcaSelecionada = e.target.value || "AMBOS"));
   $("#selRecencia").addEventListener("change", (e) => (state.recenciaSelecionada = e.target.value || "TODOS"));
   $("#selAgFaixa").addEventListener("change", (e) => (state.agendBucket = e.target.value || "TODOS"));
   $("#inpBusca").addEventListener("input", (e) => (state.busca = e.target.value || ""));
+
+  $("#selJanela").addEventListener("change", (e) => {
+    state.janelaKey = e.target.value || "TODOS";
+    const inp = $("#inpJanelaDias");
+    if (inp) inp.disabled = state.janelaKey !== "CUSTOM";
+  });
+  $("#inpJanelaDias").addEventListener("input", (e) => {
+    const v = parseInt(e.target.value || "0", 10);
+    state.janelaDiasCustom = Number.isFinite(v) && v > 0 ? v : 120;
+  });
 
   $("#stAg").addEventListener("change", (e) => (state.statusPlanilha.AGENDADO = e.target.checked));
   $("#stFm").addEventListener("change", (e) => (state.statusPlanilha.FINALIZADOM = e.target.checked));
@@ -316,9 +412,74 @@ function renderQualificacao() {
   });
   $("#btnExport").addEventListener("click", exportarListaCSV);
 
-  // sugestão aplicar
   $("#btnApplyQuick")?.addEventListener("click", () => applySuggestion(state.sugestoes.quick));
   $("#btnApplyHub")?.addEventListener("click", () => applySuggestion(state.sugestoes.hub));
+
+  document.querySelectorAll("[data-sortkey]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const key = btn.getAttribute("data-sortkey");
+      toggleTableSort(key);
+      applyCurrentSortAndRender();
+    });
+  });
+}
+
+/* ====== Ordenação manual da tabela ====== */
+function toggleTableSort(key) {
+  if (state.tableSort.key !== key) {
+    state.tableSort.key = key;
+    state.tableSort.dir = "asc";
+    return;
+  }
+  if (state.tableSort.dir === "asc") {
+    state.tableSort.dir = "desc";
+    return;
+  }
+  state.tableSort.key = null;
+  state.tableSort.dir = "asc";
+}
+
+function applyCurrentSortAndRender() {
+  if (!state.currentList?.length) return;
+  const list = [...state.currentList];
+
+  if (state.tableSort.key) list.sort(makeColumnComparator(state.tableSort.key, state.tableSort.dir));
+  else list.sort(makeMultiComparatorWithScore(state.prioridade));
+
+  renderTabela(list);
+
+  document.querySelectorAll("[data-sortkey]").forEach((btn) => {
+    const k = btn.getAttribute("data-sortkey");
+    const iconEl = btn.querySelector(".sortIcon");
+    if (!iconEl) return;
+    iconEl.textContent = state.tableSort.key === k ? (state.tableSort.dir === "asc" ? "▲" : "▼") : "";
+  });
+}
+
+function makeColumnComparator(key, dir) {
+  const mult = dir === "desc" ? -1 : 1;
+
+  return (a, b) => {
+    let av = a[key];
+    let bv = b[key];
+
+    if (key === "TOTAL_AGENDAMENTOS" || key === "AGE_DAYS") return (toInt(av) - toInt(bv)) * mult;
+
+    if (key === "SCORE_IA") {
+      const as = Number.isFinite(av) ? av : -1;
+      const bs = Number.isFinite(bv) ? bv : -1;
+      return (as - bs) * mult;
+    }
+
+    if (key === "DATA_CADASTRO") return (toDate(av) - toDate(bv)) * mult;
+
+    if (key === "MARCA") {
+      av = normalizeMarcaLabel(av);
+      bv = normalizeMarcaLabel(bv);
+    }
+
+    return String(av || "").localeCompare(String(bv || ""), "pt-BR", { sensitivity: "base" }) * mult;
+  };
 }
 
 /* =========================
@@ -344,17 +505,13 @@ function renderSuggestionBox(title, kind) {
         <button id="${btnId}" class="btn btnGhost btnTiny">Aplicar</button>
       </div>
 
-      <div class="sugLine">
-        <b>Combo:</b>
-        ${escapeHtml(sug.comboText)}
-      </div>
+      <div class="sugLine"><b>Combo:</b> ${escapeHtml(sug.comboText)}</div>
 
       <div class="sugMeta">
         <span class="badge badgeBlue">Conv: <b>${fmtPct(sug.conv)}</b></span>
         <span class="badge badgeGreen">Lift: <b>${fmtX(sug.lift)}</b></span>
         <span class="badge badgeAmber">n: <b>${sug.n}</b></span>
       </div>
-
       <div class="muted small" style="margin-top:8px;">
         (Base: mesma recência, compara com conv. geral daquele universo)
       </div>
@@ -365,20 +522,13 @@ function renderSuggestionBox(title, kind) {
 function applySuggestion(sug) {
   if (!sug) return;
 
-  // aplica nos filtros (usuário ainda pode mudar)
   state.marcaSelecionada = sug.marcaKey || "AMBOS";
   state.recenciaSelecionada = sug.recenciaKey || "TODOS";
   state.agendBucket = sug.agendKey || "TODOS";
 
-  // aplica curso e mídia via busca (mais simples) ou filtro futuro:
-  // aqui usamos busca vazia e deixamos aparecer pelo sort; MAS vamos filtrar pela combinação no gerarLista com "travamento" opcional:
-  // para manter mínimo de mudanças, aplicamos "busca" vazia e guardamos "comboLock".
   state._comboLock = { curso: sug.curso || "", midia: sug.midia || "" };
 
-  // re-render topo com selects aplicados
   renderQualificacao();
-
-  // já gera lista
   gerarLista();
 }
 
@@ -409,6 +559,11 @@ function enableDrag() {
     item.addEventListener("dragend", () => {
       item.classList.remove("dragging");
       state.prioridade = [...container.querySelectorAll(".dragItem")].map((el) => el.textContent.trim());
+
+      if (!state.tableSort.key && state.currentList?.length) {
+        state.currentList.sort(makeMultiComparatorWithScore(state.prioridade));
+        renderTabela(state.currentList);
+      }
     });
   });
 
@@ -437,33 +592,55 @@ function getDragAfterElement(container, y) {
 }
 
 /* =========================
-   Gerar lista + ordenar
+   Gerar lista + KPIs (seguem filtros)
 ========================= */
 function gerarLista() {
-  // comece com tudo
-  let lista = [...state.all];
+  const listaFiltrada = filtrarLista(state.all);
 
-  // filtro marca
+  renderKPIs(listaFiltrada);
+
+  state.currentList = [...listaFiltrada];
+
+  if (state.tableSort.key) state.currentList.sort(makeColumnComparator(state.tableSort.key, state.tableSort.dir));
+  else state.currentList.sort(makeMultiComparatorWithScore(state.prioridade));
+
+  renderTabela(state.currentList);
+
+  $("#resultadoInfo").textContent =
+    `Linhas: ${state.currentList.length} • ` +
+    `Ordem: ${state.tableSort.key ? `Manual (${state.tableSort.key} ${state.tableSort.dir})` : `Padrão (ScoreIA > ${state.prioridade.join(" > ")})`}`;
+}
+
+function filtrarLista(base) {
+  let lista = [...base];
+
+  // 0) Janela tempo para trás (AGE_DAYS <= janela)
+  const maxDays = getWindowMaxDays();
+  if (maxDays != null) {
+    lista = lista.filter((l) => l.AGE_DAYS != null && l.AGE_DAYS <= maxDays);
+  }
+
+  // 1) Marca
   if (state.marcaSelecionada !== "AMBOS") {
     lista = lista.filter((l) => normalizeMarcaKey(l.MARCA) === state.marcaSelecionada);
   }
 
-  // filtro vendedor
+  // 2) Vendedor
   if (state.vendedorSelecionado !== "TODOS") {
     lista = lista.filter((l) => (l.VENDEDOR || "").trim() === state.vendedorSelecionado);
   }
 
-  // filtro recência
+  // 3) Recência (faixa)
   if (state.recenciaSelecionada !== "TODOS") {
     lista = lista.filter((l) => recencyKeyFromAge(l.AGE_DAYS) === state.recenciaSelecionada);
   }
 
-  // filtro agend faixa
+  // 4) Agendamentos (faixa)
   if (state.agendBucket !== "TODOS") {
     lista = lista.filter((l) => agendKeyFromN(toInt(l.TOTAL_AGENDAMENTOS)) === state.agendBucket);
   }
 
-  // filtro status planilha
+  // 5) Status (Planilha)
   lista = lista.filter((l) => {
     const s = normalizeStatus(l.STATUS_PENDENTE);
     if (s === "AGENDADO") return !!state.statusPlanilha.AGENDADO;
@@ -472,7 +649,7 @@ function gerarLista() {
     return true;
   });
 
-  // busca
+  // 6) Busca CPF/nome
   const q = (state.busca || "").trim();
   if (q) {
     const qDigits = q.replace(/\D/g, "");
@@ -486,30 +663,115 @@ function gerarLista() {
     });
   }
 
-  // se veio de sugestão aplicada, travamos combo (somente para esta geração)
+  // 7) lock por sugestão IA (curso/mídia) quando aplica sugestão
   if (state._comboLock) {
     const { curso, midia } = state._comboLock;
     if (curso) lista = lista.filter((l) => normalizeText(l.CURSO) === normalizeText(curso));
     if (midia) lista = lista.filter((l) => normalizeText(l.MIDIA) === normalizeText(midia));
-    // limpa depois de aplicar uma vez (usuário continua livre)
     state._comboLock = null;
   }
 
-  // ordenação (Score IA sempre primeiro)
-  lista.sort(makeMultiComparatorWithScore(state.prioridade));
-
-  renderTabela(lista);
-
-  $("#resultadoInfo").textContent = `Linhas: ${lista.length} • Filtros ativos: ${
-    [
-      state.marcaSelecionada !== "AMBOS" ? `Marca=${state.marcaSelecionada}` : "",
-      state.vendedorSelecionado !== "TODOS" ? `Vendedor=${state.vendedorSelecionado}` : "",
-      state.recenciaSelecionada !== "TODOS" ? `Recência=${state.recenciaSelecionada}` : "",
-      state.agendBucket !== "TODOS" ? `Agend=${state.agendBucket}` : "",
-    ].filter(Boolean).join(" • ") || "nenhum"
-  } • Ordem: ScoreIA > ${state.prioridade.join(" > ")}`;
+  return lista;
 }
 
+function getWindowMaxDays() {
+  if (state.janelaKey === "TODOS") return null;
+  if (state.janelaKey === "CUSTOM") {
+    const v = parseInt(String(state.janelaDiasCustom || ""), 10);
+    return Number.isFinite(v) && v > 0 ? v : 120;
+  }
+  const n = parseInt(state.janelaKey, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+function renderKPIs(lista) {
+  const total = lista.length;
+  const mats = lista.filter(isMatriculado);
+  const mat = mats.length;
+  const conv = total ? (mat / total) : 0;
+
+  const buckets = ["0_30","31_60","61_90","90P"];
+  const byBucket = new Map(buckets.map(b => [b, { total: 0, mat: 0 }]));
+
+  for (const l of lista) {
+    const rk = recencyKeyFromAge(l.AGE_DAYS);
+    if (!byBucket.has(rk)) continue;
+    const x = byBucket.get(rk);
+    x.total += 1;
+    if (isMatriculado(l)) x.mat += 1;
+  }
+
+  const matTotalBuckets = buckets.reduce((s,b)=> s + byBucket.get(b).mat, 0);
+  const share = (b) => matTotalBuckets ? (byBucket.get(b).mat / matTotalBuckets) : 0;
+
+  const hub = byBucket.get("90P");
+  const hubTotal = hub.total;
+  const hubMat = hub.mat;
+  const hubConv = hubTotal ? (hubMat / hubTotal) : 0;
+
+  const targets = [0.03, 0.05];
+  const upliftText = hubTotal
+    ? targets.map(t => {
+        const delta = Math.max(0, Math.round(hubTotal * t) - hubMat);
+        return `${Math.round(t*100)}% → +${delta}`;
+      }).join(" • ")
+    : "—";
+
+  const kpiWrap = $("#kpiWrap");
+  const kpiNote = $("#kpiNote");
+  if (kpiNote) kpiNote.textContent = `Calculado em ${formatDateTime(new Date())} • Base filtrada atual`;
+
+  if (!kpiWrap) return;
+
+  const recLabel = (k) => (RECENCY_OPTIONS.find(o=>o.key===k)?.label || k);
+  const convBucket = (b) => {
+    const x = byBucket.get(b);
+    const c = x.total ? (x.mat / x.total) : 0;
+    return `${recLabel(b)}: ${fmtPct(c)} (n=${x.total})`;
+  };
+
+  const shareTxt = buckets.map(b => `${recLabel(b)} ${fmtPct(share(b))}`).join(" • ");
+
+  kpiWrap.innerHTML = `
+    <div class="kpi">
+      <div class="kpiTitle">Leads analisados (filtro atual)</div>
+      <div class="kpiValue">${total}</div>
+      <div class="kpiSub">Inclui apenas o que passou nos filtros acima</div>
+    </div>
+
+    <div class="kpi">
+      <div class="kpiTitle">Matriculados (FinalizadoM)</div>
+      <div class="kpiValue">${mat}</div>
+      <div class="kpiSub">Regra: STATUS_PENDENTE == FinalizadoM</div>
+    </div>
+
+    <div class="kpi">
+      <div class="kpiTitle">Conversão (base filtrada)</div>
+      <div class="kpiValue">${fmtPct(conv)}</div>
+      <div class="kpiSub">matriculados / leads analisados</div>
+      <div class="kpiMini">
+        <span>${convBucket("0_30")}</span>
+        <span>${convBucket("31_60")}</span>
+        <span>${convBucket("61_90")}</span>
+        <span>${convBucket("90P")}</span>
+      </div>
+    </div>
+
+    <div class="kpi">
+      <div class="kpiTitle">80/20 por recência (matrículas)</div>
+      <div class="kpiValue">${matTotalBuckets ? "Distribuição" : "—"}</div>
+      <div class="kpiSub">${matTotalBuckets ? shareTxt : "Sem matrículas dentro do filtro atual"}</div>
+      <div class="kpiMini" style="margin-top:8px;">
+        <span>HUB 90+: ${hubTotal ? `${hubTotal} leads • conv ${fmtPct(hubConv)}` : "—"}</span>
+        <span>Se elevar: ${upliftText}</span>
+      </div>
+    </div>
+  `;
+}
+
+/* =========================
+   Ordenação padrão (Score IA + prioridade)
+========================= */
 function makeMultiComparatorWithScore(keys) {
   return (a, b) => {
     if (ENABLE_SCORE_IA) {
@@ -540,6 +802,9 @@ function makeMultiComparatorWithScore(keys) {
   };
 }
 
+/* =========================
+   Tabela
+========================= */
 function renderTabela(lista) {
   const tbody = $("#tbody");
 
@@ -575,182 +840,15 @@ function renderTabela(lista) {
 }
 
 /* =========================
-   Sugestão IA — cálculo
-   - 2 modos fixos:
-     quick: recência 0–30
-     hub: recência 90+
-   - Busca melhor combo: (marca opcional) + curso + mídia + agendFaixa
-   - Métrica: lift * log10(n+1)
-   - conv_suave = (mat+1)/(n+2)
-========================= */
-function computeSuggestions(all) {
-  const out = { quick: null, hub: null };
-
-  // calcula uma vez buckets necessários
-  const enriched = all.map(l => ({
-    ...l,
-    REC: recencyKeyFromAge(l.AGE_DAYS),
-    AGK: agendKeyFromN(toInt(l.TOTAL_AGENDAMENTOS)),
-    MK: normalizeMarcaKey(l.MARCA), // TECNICO/PROFISSIONALIZANTE/...
-    COURSE: normalizeText(l.CURSO),
-    MEDIA: normalizeText(l.MIDIA),
-    ISMAT: isMatriculado(l),
-  }));
-
-  out.quick = bestComboForRecency(enriched, "0_30");
-  out.hub = bestComboForRecency(enriched, "90P");
-
-  return out;
-}
-
-function bestComboForRecency(rows, recKey) {
-  // universo fixo: mesma recência (comparação justa)
-  const universe = rows.filter(r => r.REC === recKey && r.COURSE && r.MEDIA);
-  const nU = universe.length;
-  if (nU < 80) return null; // pouco dado
-
-  const matU = universe.reduce((acc, r) => acc + (r.ISMAT ? 1 : 0), 0);
-  const convU = (matU + 1) / (nU + 2);
-
-  // candidatos: curso|midia|agendFaixa|marca (marca opcional entra se melhorar)
-  const map = new Map();
-
-  for (const r of universe) {
-    // primeiro sem marca (AMBOS) e também com marca específica
-    const keys = [
-      `AMBOS|${r.COURSE}|${r.MEDIA}|${r.AGK}`,
-      `${r.MK}|${r.COURSE}|${r.MEDIA}|${r.AGK}`,
-    ];
-
-    for (const k of keys) {
-      const cur = map.get(k) || { n: 0, m: 0 };
-      cur.n += 1;
-      cur.m += (r.ISMAT ? 1 : 0);
-      map.set(k, cur);
-    }
-  }
-
-  // escolhe melhor com mínimo de amostra
-  let best = null;
-
-  for (const [k, v] of map.entries()) {
-    const n = v.n;
-    if (n < 30) continue; // evita “milagre”
-    const conv = (v.m + 1) / (n + 2);   // suave
-    const lift = conv / convU;
-
-    // bônus leve para baixa energia (0–1 agend)
-    const parts = k.split("|");
-    const agk = parts[3];
-    const bonus = agk === "0_1" ? 1.08 : agk === "2_3" ? 1.00 : agk === "4P" ? 0.92 : 1.00;
-
-    const score = lift * Math.log10(n + 1) * bonus;
-
-    if (!best || score > best.score) {
-      best = { k, n, conv, lift, score };
-    }
-  }
-
-  if (!best) return null;
-
-  const [marcaKey, courseNorm, mediaNorm, agendKey] = best.k.split("|");
-
-  // reconstrói texto amigável (usa primeira ocorrência para recuperar label original)
-  const pickCourse = firstLabel(universe, "CURSO", courseNorm) || courseNorm;
-  const pickMedia = firstLabel(universe, "MIDIA", mediaNorm) || mediaNorm;
-
-  const comboText = [
-    `Recência: ${RECENCY_OPTIONS.find(o=>o.key===recKey)?.label || recKey}`,
-    marcaKey !== "AMBOS" ? `Marca: ${marcaKey === "TECNICO" ? "Técnico" : "Profissionalizante"}` : `Marca: Ambos`,
-    `Curso: ${pickCourse}`,
-    `Mídia: ${pickMedia}`,
-    `Agend.: ${AGEND_BUCKETS.find(o=>o.key===agendKey)?.label || agendKey}`
-  ].join(" • ");
-
-  return {
-    recenciaKey: recKey,
-    marcaKey,
-    curso: pickCourse,
-    midia: pickMedia,
-    agendKey,
-    n: best.n,
-    conv: best.conv,
-    lift: best.lift,
-    comboText
-  };
-}
-
-function firstLabel(universe, field, normValue) {
-  // tenta pegar o label original de algum registro que bata com o normalizado
-  for (const r of universe) {
-    if (field === "CURSO" && normalizeText(r.CURSO) === normValue) return r.CURSO;
-    if (field === "MIDIA" && normalizeText(r.MIDIA) === normValue) return r.MIDIA;
-  }
-  return "";
-}
-
-/* =========================
-   Score IA (ranking interno)
-   - baseado no par (curso|midia) e penalização por tentativas
-========================= */
-function computeScoreIA(allLeads) {
-  const total = new Map();
-  const mat = new Map();
-
-  for (const l of allLeads) {
-    const key = `${normalizeText(l.MIDIA)}|${normalizeText(l.CURSO)}`;
-    total.set(key, (total.get(key) || 0) + 1);
-    if (isMatriculado(l)) mat.set(key, (mat.get(key) || 0) + 1);
-  }
-
-  for (const l of allLeads) {
-    const key = `${normalizeText(l.MIDIA)}|${normalizeText(l.CURSO)}`;
-    const taxa = (mat.get(key) || 0) / Math.max(1, total.get(key) || 0);
-    const ag = Math.max(0, toInt(l.TOTAL_AGENDAMENTOS));
-    const penal = 1 / (1 + ag);
-    l.SCORE_IA = taxa * 0.75 + penal * 0.25;
-  }
-}
-
-/* =========================
    Export CSV (lista atual)
 ========================= */
 function exportarListaCSV() {
-  // Reutiliza os filtros atuais para recriar lista e exportar
-  let lista = [...state.all];
-
-  if (state.marcaSelecionada !== "AMBOS") lista = lista.filter((l) => normalizeMarcaKey(l.MARCA) === state.marcaSelecionada);
-  if (state.vendedorSelecionado !== "TODOS") lista = lista.filter((l) => (l.VENDEDOR || "").trim() === state.vendedorSelecionado);
-  if (state.recenciaSelecionada !== "TODOS") lista = lista.filter((l) => recencyKeyFromAge(l.AGE_DAYS) === state.recenciaSelecionada);
-  if (state.agendBucket !== "TODOS") lista = lista.filter((l) => agendKeyFromN(toInt(l.TOTAL_AGENDAMENTOS)) === state.agendBucket);
-
-  lista = lista.filter((l) => {
-    const s = normalizeStatus(l.STATUS_PENDENTE);
-    if (s === "AGENDADO") return !!state.statusPlanilha.AGENDADO;
-    if (s === "FINALIZADOM") return !!state.statusPlanilha.FINALIZADOM;
-    if (s === "FINALIZADO") return !!state.statusPlanilha.FINALIZADO;
-    return true;
-  });
-
-  const q = (state.busca || "").trim();
-  if (q) {
-    const qDigits = q.replace(/\D/g, "");
-    const qLower = q.toLowerCase();
-    lista = lista.filter((l) => {
-      const cpf = String(l.CPF || "").replace(/\D/g, "");
-      const nome = String(l.NOME || "").toLowerCase();
-      if (qDigits && cpf.includes(qDigits)) return true;
-      if (nome.includes(qLower)) return true;
-      return false;
-    });
-  }
-
-  lista.sort(makeMultiComparatorWithScore(state.prioridade));
+  if (!state.currentList?.length) return;
 
   const headers = ["CPF","NOME","MARCA","CURSO","MIDIA","VENDEDOR","DATA_CADASTRO","IDADE_DIAS","TOTAL_AGENDAMENTOS","STATUS_PENDENTE","SCORE_IA"];
   const rows = [headers.join(",")];
 
-  for (const l of lista) {
+  for (const l of state.currentList) {
     rows.push([
       csvCell(l.CPF),
       csvCell(l.NOME),
@@ -782,6 +880,116 @@ function csvCell(v) {
 }
 
 /* =========================
+   Sugestão IA — cálculo
+========================= */
+function computeSuggestions(all) {
+  const out = { quick: null, hub: null };
+
+  const enriched = all.map(l => ({
+    ...l,
+    REC: recencyKeyFromAge(l.AGE_DAYS),
+    AGK: agendKeyFromN(toInt(l.TOTAL_AGENDAMENTOS)),
+    MK: normalizeMarcaKey(l.MARCA),
+    COURSE: normalizeText(l.CURSO),
+    MEDIA: normalizeText(l.MIDIA),
+    ISMAT: isMatriculado(l),
+  }));
+
+  out.quick = bestComboForRecency(enriched, "0_30");
+  out.hub = bestComboForRecency(enriched, "90P");
+
+  return out;
+}
+
+function bestComboForRecency(rows, recKey) {
+  const universe = rows.filter(r => r.REC === recKey && r.COURSE && r.MEDIA);
+  const nU = universe.length;
+  if (nU < 80) return null;
+
+  const matU = universe.reduce((acc, r) => acc + (r.ISMAT ? 1 : 0), 0);
+  const convU = (matU + 1) / (nU + 2);
+
+  const map = new Map();
+
+  for (const r of universe) {
+    const keys = [
+      `AMBOS|${r.COURSE}|${r.MEDIA}|${r.AGK}`,
+      `${r.MK}|${r.COURSE}|${r.MEDIA}|${r.AGK}`,
+    ];
+
+    for (const k of keys) {
+      const cur = map.get(k) || { n: 0, m: 0 };
+      cur.n += 1;
+      cur.m += (r.ISMAT ? 1 : 0);
+      map.set(k, cur);
+    }
+  }
+
+  let best = null;
+
+  for (const [k, v] of map.entries()) {
+    const n = v.n;
+    if (n < 30) continue;
+    const conv = (v.m + 1) / (n + 2);
+    const lift = conv / convU;
+
+    const parts = k.split("|");
+    const agk = parts[3];
+    const bonus = agk === "0_1" ? 1.08 : agk === "2_3" ? 1.00 : agk === "4P" ? 0.92 : 1.00;
+
+    const score = lift * Math.log10(n + 1) * bonus;
+
+    if (!best || score > best.score) best = { k, n, conv, lift, score };
+  }
+
+  if (!best) return null;
+
+  const [marcaKey, courseNorm, mediaNorm, agendKey] = best.k.split("|");
+  const pickCourse = firstLabel(universe, "CURSO", courseNorm) || courseNorm;
+  const pickMedia  = firstLabel(universe, "MIDIA", mediaNorm) || mediaNorm;
+
+  const comboText = [
+    `Recência: ${RECENCY_OPTIONS.find(o=>o.key===recKey)?.label || recKey}`,
+    marcaKey !== "AMBOS" ? `Marca: ${marcaKey === "TECNICO" ? "Técnico" : "Profissionalizante"}` : `Marca: Ambos`,
+    `Curso: ${pickCourse}`,
+    `Mídia: ${pickMedia}`,
+    `Agend.: ${AGEND_BUCKETS.find(o=>o.key===agendKey)?.label || agendKey}`
+  ].join(" • ");
+
+  return { recenciaKey: recKey, marcaKey, curso: pickCourse, midia: pickMedia, agendKey, n: best.n, conv: best.conv, lift: best.lift, comboText };
+}
+
+function firstLabel(universe, field, normValue) {
+  for (const r of universe) {
+    if (field === "CURSO" && normalizeText(r.CURSO) === normValue) return r.CURSO;
+    if (field === "MIDIA" && normalizeText(r.MIDIA) === normValue) return r.MIDIA;
+  }
+  return "";
+}
+
+/* =========================
+   Score IA (simples)
+========================= */
+function computeScoreIA(allLeads) {
+  const total = new Map();
+  const mat = new Map();
+
+  for (const l of allLeads) {
+    const key = `${normalizeText(l.MIDIA)}|${normalizeText(l.CURSO)}`;
+    total.set(key, (total.get(key) || 0) + 1);
+    if (isMatriculado(l)) mat.set(key, (mat.get(key) || 0) + 1);
+  }
+
+  for (const l of allLeads) {
+    const key = `${normalizeText(l.MIDIA)}|${normalizeText(l.CURSO)}`;
+    const taxa = (mat.get(key) || 0) / Math.max(1, total.get(key) || 0);
+    const ag = Math.max(0, toInt(l.TOTAL_AGENDAMENTOS));
+    const penal = 1 / (1 + ag);
+    l.SCORE_IA = taxa * 0.75 + penal * 0.25;
+  }
+}
+
+/* =========================
    CSV fetch + parse
 ========================= */
 async function fetchCsvNoCache(url) {
@@ -803,14 +1011,9 @@ function parseCSV(text) {
     const next = text[i + 1];
 
     if (inQuotes) {
-      if (c === '"' && next === '"') {
-        field += '"';
-        i++;
-      } else if (c === '"') {
-        inQuotes = false;
-      } else {
-        field += c;
-      }
+      if (c === '"' && next === '"') { field += '"'; i++; }
+      else if (c === '"') inQuotes = false;
+      else field += c;
       continue;
     }
 
@@ -870,7 +1073,7 @@ function normalizeLead(r, idx) {
   const dataCad = get("DATA_CADASTRO");
   const age = computeAgeDays(dataCad);
 
-  const lead = {
+  return {
     ID: idx + 1,
     MARCA: get("MARCA"),
     NOME: get("NOME"),
@@ -887,10 +1090,6 @@ function normalizeLead(r, idx) {
     FONE2: get("FONE2"),
     FONE3: get("FONE3"),
   };
-
-  DEFAULT_PRIORIDADE.forEach((k) => { if (!(k in lead)) lead[k] = ""; });
-
-  return lead;
 }
 
 /* =========================
@@ -901,6 +1100,7 @@ function normalizeStatus(s) {
 }
 
 function isMatriculado(l) {
+  // Regra definida por você:
   return normalizeStatus(l.STATUS_PENDENTE) === "FINALIZADOM";
 }
 
@@ -946,7 +1146,6 @@ function toDate(v) {
   const iso = Date.parse(s);
   if (!Number.isNaN(iso)) return iso;
 
-  // dd/mm/yyyy (com ou sem hora)
   const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
   if (m) {
     const dd = parseInt(m[1], 10);
@@ -985,13 +1184,8 @@ function agendKeyFromN(n) {
   return "4P";
 }
 
-function unique(arr) {
-  return [...new Set(arr)];
-}
-
-function formatDateTime(d) {
-  try { return d.toLocaleString("pt-BR"); } catch { return String(d); }
-}
+function unique(arr) { return [...new Set(arr)]; }
+function formatDateTime(d) { try { return d.toLocaleString("pt-BR"); } catch { return String(d); } }
 
 function escapeHtml(s) {
   return String(s ?? "")
@@ -1001,10 +1195,7 @@ function escapeHtml(s) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
-
-function escapeAttr(s) {
-  return escapeHtml(s).replaceAll('"', "&quot;");
-}
+function escapeAttr(s) { return escapeHtml(s).replaceAll('"', "&quot;"); }
 
 function renderLoading(msg) {
   const view = $("#view");
@@ -1033,11 +1224,5 @@ function renderError(err) {
   });
 }
 
-function fmtPct(x) {
-  const v = Number(x || 0);
-  return (v * 100).toFixed(1) + "%";
-}
-function fmtX(x) {
-  const v = Number(x || 0);
-  return v.toFixed(2) + "x";
-}
+function fmtPct(x) { const v = Number(x || 0); return (v * 100).toFixed(1) + "%"; }
+function fmtX(x) { const v = Number(x || 0); return v.toFixed(2) + "x"; }
