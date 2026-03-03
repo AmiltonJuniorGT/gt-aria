@@ -1,21 +1,22 @@
 /* ================================
    GT ARIA — Qualificação (Google Sheets CSV)
-   - KPIs EXECUTIVOS seguem filtros
-   - Recência calculada por DATA_CADASTRO
-   - Tabela ordenável por clique no cabeçalho
-   - Janela "tempo para trás" (últimos X dias / custom)
-   - Matriculou: STATUS_PENDENTE == FinalizadoM
+   - VENDEDOR é PARTIÇÃO FIXA (sempre primeiro)
+   - Drag define a CLASSIFICAÇÃO HIERÁRQUICA dentro do vendedor
+   - KPIs seguem filtros
+   - Recência por DATA_CADASTRO
+   - Tabela ordenável por clique (opcional; não quebra o agrupamento)
 =================================== */
 
-/** ✅ ATENÇÃO: confirme sempre o gid da aba "data" */
+/** ✅ Troque aqui se mudar o Sheets */
 const SHEET_CSV_URL =
   "https://docs.google.com/spreadsheets/d/1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI/export?format=csv&gid=1731723852";
 
 const ENABLE_SCORE_IA = true;
 
-const DEFAULT_PRIORIDADE = ["VENDEDOR", "DATA_CADASTRO", "TOTAL_AGENDAMENTOS", "MIDIA", "CURSO"];
+/** Ordem padrão (agora é "dentro do vendedor") */
+const DEFAULT_PRIORIDADE = ["DATA_CADASTRO", "TOTAL_AGENDAMENTOS", "MIDIA", "CURSO"];
+
 const SORT_DIR = {
-  VENDEDOR: "asc",
   DATA_CADASTRO: "desc",
   TOTAL_AGENDAMENTOS: "asc",
   MIDIA: "asc",
@@ -54,37 +55,27 @@ const state = {
 
   all: [],
   vendedores: [],
-  marcas: [],
 
-  vendedorSelecionado: "TODOS",
   marcaSelecionada: "AMBOS",
+  vendedorSelecionado: "TODOS",
 
-  /** recência (faixas 0-30/31-60/...) */
   recenciaSelecionada: "TODOS",
-
-  /** filtro por agendamentos (faixa) */
   agendBucket: "TODOS",
 
-  /** tempo para trás (janela) */
   janelaKey: "TODOS",
   janelaDiasCustom: 120,
 
-  /** busca (CPF/NOME) */
   busca: "",
 
-  /** status da planilha */
   statusPlanilha: { AGENDADO: true, FINALIZADOM: false, FINALIZADO: false },
 
-  /** ordenação por prioridade arrastável */
+  /** Arraste = só “dentro do vendedor” */
   prioridade: [...DEFAULT_PRIORIDADE],
 
-  /** sugestões */
-  sugestoes: { quick: null, hub: null },
-
-  /** lista atual da tabela */
+  /** lista atual (filtrada) */
   currentList: [],
 
-  /** ordenação manual (clicando no cabeçalho) */
+  /** ordenar tabela por clique (quando ativo, ainda respeita grupos por vendedor) */
   tableSort: { key: null, dir: "asc" },
 };
 
@@ -103,6 +94,7 @@ function init() {
     a.addEventListener("click", () => (location.hash = a.getAttribute("data-route")));
   });
 
+  // top reload (se existir no seu index)
   $("#btnReloadTop")?.addEventListener("click", async () => {
     await boot();
     renderRoute();
@@ -125,13 +117,7 @@ async function boot() {
       state.all.map((l) => (l.VENDEDOR || "").trim()).filter(Boolean)
     ).sort((a, b) => a.localeCompare(b, "pt-BR"));
 
-    state.marcas = unique(
-      state.all.map((l) => normalizeMarcaLabel(l.MARCA)).filter(Boolean)
-    ).sort((a, b) => a.localeCompare(b, "pt-BR"));
-
     if (ENABLE_SCORE_IA) computeScoreIA(state.all);
-
-    state.sugestoes = computeSuggestions(state.all);
 
     state.lastUpdated = new Date();
     state.loading = false;
@@ -145,7 +131,6 @@ async function boot() {
 function renderRoute() {
   const hash = location.hash || "#/qualificacao";
   const crumbs = $("#crumbs");
-
   if (crumbs) {
     crumbs.textContent =
       hash === "#/login"
@@ -169,6 +154,9 @@ function renderPlaceholder(title) {
   `;
 }
 
+/* =========================
+   UI principal
+========================= */
 function renderQualificacao() {
   const view = $("#view");
   if (state.loading) return renderLoading("Carregando…");
@@ -176,60 +164,48 @@ function renderQualificacao() {
 
   const totalAll = state.all.length;
   const totalMat = state.all.filter(isMatriculado).length;
-  const totalNaoMat = totalAll - totalMat;
 
   view.innerHTML = `
     <div class="card">
-      <div class="rowBetween">
+      <div style="display:flex;gap:12px;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;">
         <div>
           <h2 style="margin:0 0 4px 0;">Qualificação de Leads (HUB)</h2>
-          <div class="muted small">
-            Base total: <b>${totalAll}</b> • Não clientes: <b>${totalNaoMat}</b> • Clientes (FinalizadoM): <b>${totalMat}</b>
+          <div style="opacity:.85;font-size:13px">
+            Base total: <b>${totalAll}</b> • Clientes (FinalizadoM): <b>${totalMat}</b>
             ${state.lastUpdated ? `• Atualizado: <b>${formatDateTime(state.lastUpdated)}</b>` : ""}
           </div>
-          <div class="muted small" style="margin-top:6px;">
-            Recência/KPIs usam: <b>DATA_CADASTRO</b>. Matriculou: <b>STATUS_PENDENTE == FinalizadoM</b>.
+          <div style="opacity:.8;font-size:12px;margin-top:6px;">
+            <b>Partição fixa:</b> VENDEDOR. Arraste define a classificação <b>dentro</b> do vendedor.
           </div>
         </div>
 
-        <div class="row" style="align-items:flex-end;">
-          <div class="ctrl" style="min-width:210px;">
-            <label>Marca</label>
-            <select id="selMarca" class="select">
-              <option value="AMBOS">Ambos</option>
-              <option value="TECNICO" ${state.marcaSelecionada==="TECNICO"?"selected":""}>Técnico</option>
-              <option value="PROFISSIONALIZANTE" ${state.marcaSelecionada==="PROFISSIONALIZANTE"?"selected":""}>Profissionalizante</option>
-            </select>
-          </div>
-
-          <div class="ctrl" style="min-width:210px;">
-            <label>Vendedor</label>
-            <select id="selVendedor" class="select">
-              <option value="TODOS">Todos</option>
-              ${state.vendedores.map(v => `<option value="${escapeAttr(v)}" ${state.vendedorSelecionado===v?"selected":""}>${escapeHtml(v)}</option>`).join("")}
-            </select>
-          </div>
-
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
           <button id="btnRecarregar" class="btn btnGhost">Recarregar</button>
           <button id="btnGerar" class="btn btnPrimary">Gerar Lista</button>
           <button id="btnExport" class="btn btnGhost">Exportar (CSV)</button>
         </div>
       </div>
 
-      <div class="hSep"></div>
-
-      <div class="rowBetween">
-        <div class="checkRow">
-          <div class="muted small"><b>Status (Planilha):</b></div>
-          <label><input type="checkbox" id="stAg" ${state.statusPlanilha.AGENDADO?"checked":""}/> Agendado</label>
-          <label><input type="checkbox" id="stFm" ${state.statusPlanilha.FINALIZADOM?"checked":""}/> FinalizadoM</label>
-          <label><input type="checkbox" id="stF" ${state.statusPlanilha.FINALIZADO?"checked":""}/> Finalizado</label>
-        </div>
-      </div>
-
-      <div class="hSep"></div>
+      <div style="height:12px"></div>
 
       <div class="row" style="align-items:flex-end;">
+        <div class="ctrl" style="min-width:210px;">
+          <label>Marca</label>
+          <select id="selMarca" class="select">
+            <option value="AMBOS">Ambos</option>
+            <option value="TECNICO" ${state.marcaSelecionada==="TECNICO"?"selected":""}>Técnico</option>
+            <option value="PROFISSIONALIZANTE" ${state.marcaSelecionada==="PROFISSIONALIZANTE"?"selected":""}>Profissionalizante</option>
+          </select>
+        </div>
+
+        <div class="ctrl" style="min-width:210px;">
+          <label>Vendedor (opcional)</label>
+          <select id="selVendedor" class="select">
+            <option value="TODOS">Todos</option>
+            ${state.vendedores.map(v => `<option value="${escapeAttr(v)}" ${state.vendedorSelecionado===v?"selected":""}>${escapeHtml(v)}</option>`).join("")}
+          </select>
+        </div>
+
         <div class="ctrl" style="min-width:210px;">
           <label>Janela (tempo para trás)</label>
           <select id="selJanela" class="select">
@@ -259,64 +235,37 @@ function renderQualificacao() {
           </select>
         </div>
 
-        <div class="ctrl" style="min-width:320px; flex:1;">
+        <div class="ctrl" style="min-width:320px;flex:1;">
           <label>Buscar (CPF/Nome)</label>
           <input id="inpBusca" class="input" placeholder="Digite CPF ou nome..." value="${escapeAttr(state.busca)}" />
         </div>
       </div>
-    </div>
 
-    <div class="hSep"></div>
+      <div style="height:10px"></div>
 
-    <div class="card">
-      <div class="rowBetween">
-        <h3 style="margin:0;">Sugestão IA (recomendação, você decide)</h3>
-        <div class="muted small">Baseada no histórico de <b>FinalizadoM</b> (virou cliente)</div>
-      </div>
-
-      <div class="hSep"></div>
-
-      <div class="sugGrid">
-        ${renderSuggestionBox("Fechar rápido (novos 0–30)", "quick")}
-        ${renderSuggestionBox("Missão HUB (antigos 90+)", "hub")}
+      <div class="checkRow">
+        <div class="muted small"><b>Status (Planilha):</b></div>
+        <label><input type="checkbox" id="stAg" ${state.statusPlanilha.AGENDADO?"checked":""}/> Agendado</label>
+        <label><input type="checkbox" id="stFm" ${state.statusPlanilha.FINALIZADOM?"checked":""}/> FinalizadoM</label>
+        <label><input type="checkbox" id="stF" ${state.statusPlanilha.FINALIZADO?"checked":""}/> Finalizado</label>
       </div>
     </div>
 
     <div class="hSep"></div>
 
     <div class="card">
-      <div class="rowBetween">
-        <h3 style="margin:0;">KPIs (seguem filtros atuais)</h3>
-        <div class="muted small" id="kpiNote">Clique em <b>Gerar Lista</b> para calcular.</div>
+      <h3 style="margin:0 0 8px 0;">Classificação (dentro do Vendedor) — arraste para reordenar</h3>
+      <div class="muted small" style="margin-bottom:8px;">
+        Resultado sempre vem em <b>blocos por Vendedor</b>. Dentro de cada bloco, aplica a ordem abaixo (hierárquica).
       </div>
-
-      <div class="hSep"></div>
-
-      <div id="kpiWrap" class="kpiGrid">
-        ${renderKpiPlaceholder()}
-      </div>
-
-      <div class="muted small" style="margin-top:10px;">
-        Obs.: como KPIs seguem filtros, se você desmarcar <b>FinalizadoM</b>, “matriculados” pode zerar.
-      </div>
-    </div>
-
-    <div class="hSep"></div>
-
-    <div class="card">
-      <h3 style="margin:0 0 8px 0;">Prioridade de Ordenação (arraste)</h3>
       <div id="drag" style="max-width:520px;"></div>
-      <div class="muted small" style="margin-top:8px;">
-        Padrão: Score IA (se ligado) > sua ordem arrastável.
-        <br/>Na tabela, clique no cabeçalho para ordenar manualmente (▲/▼).
-      </div>
     </div>
 
     <div class="hSep"></div>
 
     <div class="card">
       <div class="rowBetween">
-        <h3 style="margin:0;">Resultado</h3>
+        <h3 style="margin:0;">Resultado (agrupado por Vendedor)</h3>
         <div class="muted small" id="resultadoInfo">Clique em <b>Gerar Lista</b>.</div>
       </div>
 
@@ -324,13 +273,13 @@ function renderQualificacao() {
         <table id="tbl">
           <thead>
             <tr>
-              ${renderSortableTh("#", null)}
+              <th>#</th>
               ${renderSortableTh("Nome", "NOME")}
               ${renderSortableTh("CPF", "CPF")}
               ${renderSortableTh("Curso", "CURSO")}
               ${renderSortableTh("Mídia", "MIDIA")}
               ${renderSortableTh("Marca", "MARCA")}
-              ${renderSortableTh("Vendedor", "VENDEDOR")}
+              <th>Vendedor</th>
               ${renderSortableTh("Data Cad.", "DATA_CADASTRO")}
               ${renderSortableTh("Dias", "AGE_DAYS")}
               ${renderSortableTh("Agend.", "TOTAL_AGENDAMENTOS")}
@@ -351,24 +300,7 @@ function renderQualificacao() {
   bindUI();
 }
 
-/* =========================
-   KPI placeholders
-========================= */
-function renderKpiPlaceholder() {
-  return `
-    <div class="kpi"><div class="kpiTitle">Leads analisados</div><div class="kpiValue">—</div><div class="kpiSub">—</div></div>
-    <div class="kpi"><div class="kpiTitle">Matriculados (FinalizadoM)</div><div class="kpiValue">—</div><div class="kpiSub">—</div></div>
-    <div class="kpi"><div class="kpiTitle">Conversão</div><div class="kpiValue">—</div><div class="kpiSub">—</div></div>
-    <div class="kpi"><div class="kpiTitle">80/20 por recência</div><div class="kpiValue">—</div><div class="kpiSub">—</div></div>
-  `;
-}
-
-/* =========================
-   Table header sortable
-========================= */
 function renderSortableTh(label, key) {
-  if (!key) return `<th>${escapeHtml(label)}</th>`;
-
   const isActive = state.tableSort.key === key;
   const icon = isActive ? (state.tableSort.dir === "asc" ? "▲" : "▼") : "";
   return `
@@ -382,7 +314,7 @@ function renderSortableTh(label, key) {
 }
 
 /* =========================
-   UI bind
+   Bind UI
 ========================= */
 function bindUI() {
   $("#selVendedor").addEventListener("change", (e) => (state.vendedorSelecionado = e.target.value || "TODOS"));
@@ -412,128 +344,17 @@ function bindUI() {
   });
   $("#btnExport").addEventListener("click", exportarListaCSV);
 
-  $("#btnApplyQuick")?.addEventListener("click", () => applySuggestion(state.sugestoes.quick));
-  $("#btnApplyHub")?.addEventListener("click", () => applySuggestion(state.sugestoes.hub));
-
   document.querySelectorAll("[data-sortkey]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const key = btn.getAttribute("data-sortkey");
       toggleTableSort(key);
-      applyCurrentSortAndRender();
+      applySortAndRenderGrouped();
     });
   });
 }
 
-/* ====== Ordenação manual da tabela ====== */
-function toggleTableSort(key) {
-  if (state.tableSort.key !== key) {
-    state.tableSort.key = key;
-    state.tableSort.dir = "asc";
-    return;
-  }
-  if (state.tableSort.dir === "asc") {
-    state.tableSort.dir = "desc";
-    return;
-  }
-  state.tableSort.key = null;
-  state.tableSort.dir = "asc";
-}
-
-function applyCurrentSortAndRender() {
-  if (!state.currentList?.length) return;
-  const list = [...state.currentList];
-
-  if (state.tableSort.key) list.sort(makeColumnComparator(state.tableSort.key, state.tableSort.dir));
-  else list.sort(makeMultiComparatorWithScore(state.prioridade));
-
-  renderTabela(list);
-
-  document.querySelectorAll("[data-sortkey]").forEach((btn) => {
-    const k = btn.getAttribute("data-sortkey");
-    const iconEl = btn.querySelector(".sortIcon");
-    if (!iconEl) return;
-    iconEl.textContent = state.tableSort.key === k ? (state.tableSort.dir === "asc" ? "▲" : "▼") : "";
-  });
-}
-
-function makeColumnComparator(key, dir) {
-  const mult = dir === "desc" ? -1 : 1;
-
-  return (a, b) => {
-    let av = a[key];
-    let bv = b[key];
-
-    if (key === "TOTAL_AGENDAMENTOS" || key === "AGE_DAYS") return (toInt(av) - toInt(bv)) * mult;
-
-    if (key === "SCORE_IA") {
-      const as = Number.isFinite(av) ? av : -1;
-      const bs = Number.isFinite(bv) ? bv : -1;
-      return (as - bs) * mult;
-    }
-
-    if (key === "DATA_CADASTRO") return (toDate(av) - toDate(bv)) * mult;
-
-    if (key === "MARCA") {
-      av = normalizeMarcaLabel(av);
-      bv = normalizeMarcaLabel(bv);
-    }
-
-    return String(av || "").localeCompare(String(bv || ""), "pt-BR", { sensitivity: "base" }) * mult;
-  };
-}
-
 /* =========================
-   Sugestões IA (render)
-========================= */
-function renderSuggestionBox(title, kind) {
-  const sug = state.sugestoes[kind];
-  if (!sug) {
-    return `
-      <div class="sugBox">
-        <div class="sugTitle">${escapeHtml(title)}</div>
-        <div class="muted small">Sem dados suficientes ainda para sugerir.</div>
-      </div>
-    `;
-  }
-
-  const btnId = kind === "quick" ? "btnApplyQuick" : "btnApplyHub";
-
-  return `
-    <div class="sugBox">
-      <div class="rowBetween">
-        <div class="sugTitle">${escapeHtml(title)}</div>
-        <button id="${btnId}" class="btn btnGhost btnTiny">Aplicar</button>
-      </div>
-
-      <div class="sugLine"><b>Combo:</b> ${escapeHtml(sug.comboText)}</div>
-
-      <div class="sugMeta">
-        <span class="badge badgeBlue">Conv: <b>${fmtPct(sug.conv)}</b></span>
-        <span class="badge badgeGreen">Lift: <b>${fmtX(sug.lift)}</b></span>
-        <span class="badge badgeAmber">n: <b>${sug.n}</b></span>
-      </div>
-      <div class="muted small" style="margin-top:8px;">
-        (Base: mesma recência, compara com conv. geral daquele universo)
-      </div>
-    </div>
-  `;
-}
-
-function applySuggestion(sug) {
-  if (!sug) return;
-
-  state.marcaSelecionada = sug.marcaKey || "AMBOS";
-  state.recenciaSelecionada = sug.recenciaKey || "TODOS";
-  state.agendBucket = sug.agendKey || "TODOS";
-
-  state._comboLock = { curso: sug.curso || "", midia: sug.midia || "" };
-
-  renderQualificacao();
-  gerarLista();
-}
-
-/* =========================
-   Drag & Drop prioridade
+   Drag & Drop (somente dentro do vendedor)
 ========================= */
 function renderDrag() {
   const drag = $("#drag");
@@ -560,10 +381,8 @@ function enableDrag() {
       item.classList.remove("dragging");
       state.prioridade = [...container.querySelectorAll(".dragItem")].map((el) => el.textContent.trim());
 
-      if (!state.tableSort.key && state.currentList?.length) {
-        state.currentList.sort(makeMultiComparatorWithScore(state.prioridade));
-        renderTabela(state.currentList);
-      }
+      // se não estiver em sort manual, re-render
+      if (!state.tableSort.key && state.currentList?.length) applySortAndRenderGrouped();
     });
   });
 
@@ -592,55 +411,138 @@ function getDragAfterElement(container, y) {
 }
 
 /* =========================
-   Gerar lista + KPIs (seguem filtros)
+   Gerar + Agrupar por Vendedor (fixo)
 ========================= */
 function gerarLista() {
-  const listaFiltrada = filtrarLista(state.all);
+  // base filtrada
+  const lista = filtrarLista(state.all);
+  state.currentList = [...lista];
 
-  renderKPIs(listaFiltrada);
-
-  state.currentList = [...listaFiltrada];
-
-  if (state.tableSort.key) state.currentList.sort(makeColumnComparator(state.tableSort.key, state.tableSort.dir));
-  else state.currentList.sort(makeMultiComparatorWithScore(state.prioridade));
-
-  renderTabela(state.currentList);
+  applySortAndRenderGrouped();
 
   $("#resultadoInfo").textContent =
     `Linhas: ${state.currentList.length} • ` +
-    `Ordem: ${state.tableSort.key ? `Manual (${state.tableSort.key} ${state.tableSort.dir})` : `Padrão (ScoreIA > ${state.prioridade.join(" > ")})`}`;
+    `Partição: VENDEDOR • Dentro: ${state.prioridade.join(" > ")}` +
+    (state.tableSort.key ? ` • Sort manual: ${state.tableSort.key} ${state.tableSort.dir}` : "");
 }
 
+function applySortAndRenderGrouped() {
+  // 1) sempre agrupa por vendedor
+  const groups = groupBy(state.currentList, (l) => (l.VENDEDOR || "").trim() || "(sem vendedor)");
+
+  // 2) ordena vendedores (asc)
+  const vendedores = Object.keys(groups).sort((a, b) => a.localeCompare(b, "pt-BR", { sensitivity: "base" }));
+
+  // 3) ordena dentro de cada vendedor:
+  //    - se usuário clicou cabeçalho => respeita sort manual (aplicado dentro do vendedor)
+  //    - senão => Score IA (desc) + prioridade arrastada (hierárquico)
+  for (const v of vendedores) {
+    if (state.tableSort.key) {
+      groups[v].sort(makeColumnComparator(state.tableSort.key, state.tableSort.dir));
+    } else {
+      groups[v].sort(makeMultiComparatorWithScore(state.prioridade));
+    }
+  }
+
+  // 4) render agrupado
+  renderTabelaGrouped(vendedores, groups);
+
+  // atualiza ícones de sort
+  document.querySelectorAll("[data-sortkey]").forEach((btn) => {
+    const k = btn.getAttribute("data-sortkey");
+    const iconEl = btn.querySelector(".sortIcon");
+    if (!iconEl) return;
+    iconEl.textContent = state.tableSort.key === k ? (state.tableSort.dir === "asc" ? "▲" : "▼") : "";
+  });
+}
+
+function renderTabelaGrouped(vendedores, groups) {
+  const tbody = $("#tbody");
+
+  if (!state.currentList.length) {
+    tbody.innerHTML = `<tr><td colspan="${ENABLE_SCORE_IA ? 13 : 12}" class="muted">Nenhum lead para este filtro.</td></tr>`;
+    return;
+  }
+
+  let rowIndex = 0;
+  const html = [];
+
+  for (const vend of vendedores) {
+    const list = groups[vend] || [];
+    if (!list.length) continue;
+
+    html.push(`
+      <tr>
+        <td colspan="${ENABLE_SCORE_IA ? 13 : 12}" style="background:#f8fafc;border-bottom:1px solid #e5e7eb;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+            <div style="font-weight:1000;">${escapeHtml(vend)}</div>
+            <div style="opacity:.8;font-size:12px;">${list.length} leads</div>
+          </div>
+        </td>
+      </tr>
+    `);
+
+    for (const l of list) {
+      rowIndex += 1;
+      const wa = buildWhatsLink(l);
+      const status = normalizeStatus(l.STATUS_PENDENTE);
+      const marcaLabel = normalizeMarcaLabel(l.MARCA);
+      const days = Number.isFinite(l.AGE_DAYS) ? l.AGE_DAYS : "";
+
+      html.push(`
+        <tr>
+          <td>${rowIndex}</td>
+          <td>${escapeHtml(l.NOME || "")}</td>
+          <td>${escapeHtml(l.CPF || "")}</td>
+          <td>${escapeHtml(l.CURSO || "")}</td>
+          <td>${escapeHtml(l.MIDIA || "")}</td>
+          <td>${escapeHtml(marcaLabel || "")}</td>
+          <td>${escapeHtml(l.VENDEDOR || "")}</td>
+          <td>${escapeHtml(l.DATA_CADASTRO || "")}</td>
+          <td>${escapeHtml(String(days))}</td>
+          <td>${escapeHtml(String(toInt(l.TOTAL_AGENDAMENTOS)))}</td>
+          <td>${escapeHtml(status)}</td>
+          ${ENABLE_SCORE_IA ? `<td>${l.SCORE_IA != null ? Number(l.SCORE_IA).toFixed(3) : ""}</td>` : ""}
+          <td>${wa ? `<a href="${wa}" target="_blank">Whats</a>` : "-"}</td>
+        </tr>
+      `);
+    }
+  }
+
+  tbody.innerHTML = html.join("");
+}
+
+/* =========================
+   Filtros
+========================= */
 function filtrarLista(base) {
   let lista = [...base];
 
-  // 0) Janela tempo para trás (AGE_DAYS <= janela)
+  // janela tempo para trás
   const maxDays = getWindowMaxDays();
-  if (maxDays != null) {
-    lista = lista.filter((l) => l.AGE_DAYS != null && l.AGE_DAYS <= maxDays);
-  }
+  if (maxDays != null) lista = lista.filter((l) => l.AGE_DAYS != null && l.AGE_DAYS <= maxDays);
 
-  // 1) Marca
+  // marca
   if (state.marcaSelecionada !== "AMBOS") {
     lista = lista.filter((l) => normalizeMarcaKey(l.MARCA) === state.marcaSelecionada);
   }
 
-  // 2) Vendedor
+  // vendedor (opcional)
   if (state.vendedorSelecionado !== "TODOS") {
     lista = lista.filter((l) => (l.VENDEDOR || "").trim() === state.vendedorSelecionado);
   }
 
-  // 3) Recência (faixa)
+  // recência
   if (state.recenciaSelecionada !== "TODOS") {
     lista = lista.filter((l) => recencyKeyFromAge(l.AGE_DAYS) === state.recenciaSelecionada);
   }
 
-  // 4) Agendamentos (faixa)
+  // agendamentos
   if (state.agendBucket !== "TODOS") {
     lista = lista.filter((l) => agendKeyFromN(toInt(l.TOTAL_AGENDAMENTOS)) === state.agendBucket);
   }
 
-  // 5) Status (Planilha)
+  // status
   lista = lista.filter((l) => {
     const s = normalizeStatus(l.STATUS_PENDENTE);
     if (s === "AGENDADO") return !!state.statusPlanilha.AGENDADO;
@@ -649,7 +551,7 @@ function filtrarLista(base) {
     return true;
   });
 
-  // 6) Busca CPF/nome
+  // busca CPF/nome
   const q = (state.busca || "").trim();
   if (q) {
     const qDigits = q.replace(/\D/g, "");
@@ -661,14 +563,6 @@ function filtrarLista(base) {
       if (nome.includes(qLower)) return true;
       return false;
     });
-  }
-
-  // 7) lock por sugestão IA (curso/mídia) quando aplica sugestão
-  if (state._comboLock) {
-    const { curso, midia } = state._comboLock;
-    if (curso) lista = lista.filter((l) => normalizeText(l.CURSO) === normalizeText(curso));
-    if (midia) lista = lista.filter((l) => normalizeText(l.MIDIA) === normalizeText(midia));
-    state._comboLock = null;
   }
 
   return lista;
@@ -684,94 +578,49 @@ function getWindowMaxDays() {
   return Number.isFinite(n) ? n : null;
 }
 
-function renderKPIs(lista) {
-  const total = lista.length;
-  const mats = lista.filter(isMatriculado);
-  const mat = mats.length;
-  const conv = total ? (mat / total) : 0;
-
-  const buckets = ["0_30","31_60","61_90","90P"];
-  const byBucket = new Map(buckets.map(b => [b, { total: 0, mat: 0 }]));
-
-  for (const l of lista) {
-    const rk = recencyKeyFromAge(l.AGE_DAYS);
-    if (!byBucket.has(rk)) continue;
-    const x = byBucket.get(rk);
-    x.total += 1;
-    if (isMatriculado(l)) x.mat += 1;
+/* =========================
+   Ordenação
+========================= */
+function toggleTableSort(key) {
+  if (state.tableSort.key !== key) {
+    state.tableSort.key = key;
+    state.tableSort.dir = "asc";
+    return;
   }
-
-  const matTotalBuckets = buckets.reduce((s,b)=> s + byBucket.get(b).mat, 0);
-  const share = (b) => matTotalBuckets ? (byBucket.get(b).mat / matTotalBuckets) : 0;
-
-  const hub = byBucket.get("90P");
-  const hubTotal = hub.total;
-  const hubMat = hub.mat;
-  const hubConv = hubTotal ? (hubMat / hubTotal) : 0;
-
-  const targets = [0.03, 0.05];
-  const upliftText = hubTotal
-    ? targets.map(t => {
-        const delta = Math.max(0, Math.round(hubTotal * t) - hubMat);
-        return `${Math.round(t*100)}% → +${delta}`;
-      }).join(" • ")
-    : "—";
-
-  const kpiWrap = $("#kpiWrap");
-  const kpiNote = $("#kpiNote");
-  if (kpiNote) kpiNote.textContent = `Calculado em ${formatDateTime(new Date())} • Base filtrada atual`;
-
-  if (!kpiWrap) return;
-
-  const recLabel = (k) => (RECENCY_OPTIONS.find(o=>o.key===k)?.label || k);
-  const convBucket = (b) => {
-    const x = byBucket.get(b);
-    const c = x.total ? (x.mat / x.total) : 0;
-    return `${recLabel(b)}: ${fmtPct(c)} (n=${x.total})`;
-  };
-
-  const shareTxt = buckets.map(b => `${recLabel(b)} ${fmtPct(share(b))}`).join(" • ");
-
-  kpiWrap.innerHTML = `
-    <div class="kpi">
-      <div class="kpiTitle">Leads analisados (filtro atual)</div>
-      <div class="kpiValue">${total}</div>
-      <div class="kpiSub">Inclui apenas o que passou nos filtros acima</div>
-    </div>
-
-    <div class="kpi">
-      <div class="kpiTitle">Matriculados (FinalizadoM)</div>
-      <div class="kpiValue">${mat}</div>
-      <div class="kpiSub">Regra: STATUS_PENDENTE == FinalizadoM</div>
-    </div>
-
-    <div class="kpi">
-      <div class="kpiTitle">Conversão (base filtrada)</div>
-      <div class="kpiValue">${fmtPct(conv)}</div>
-      <div class="kpiSub">matriculados / leads analisados</div>
-      <div class="kpiMini">
-        <span>${convBucket("0_30")}</span>
-        <span>${convBucket("31_60")}</span>
-        <span>${convBucket("61_90")}</span>
-        <span>${convBucket("90P")}</span>
-      </div>
-    </div>
-
-    <div class="kpi">
-      <div class="kpiTitle">80/20 por recência (matrículas)</div>
-      <div class="kpiValue">${matTotalBuckets ? "Distribuição" : "—"}</div>
-      <div class="kpiSub">${matTotalBuckets ? shareTxt : "Sem matrículas dentro do filtro atual"}</div>
-      <div class="kpiMini" style="margin-top:8px;">
-        <span>HUB 90+: ${hubTotal ? `${hubTotal} leads • conv ${fmtPct(hubConv)}` : "—"}</span>
-        <span>Se elevar: ${upliftText}</span>
-      </div>
-    </div>
-  `;
+  if (state.tableSort.dir === "asc") {
+    state.tableSort.dir = "desc";
+    return;
+  }
+  state.tableSort.key = null;
+  state.tableSort.dir = "asc";
 }
 
-/* =========================
-   Ordenação padrão (Score IA + prioridade)
-========================= */
+function makeColumnComparator(key, dir) {
+  const mult = dir === "desc" ? -1 : 1;
+
+  return (a, b) => {
+    let av = a[key];
+    let bv = b[key];
+
+    if (key === "TOTAL_AGENDAMENTOS" || key === "AGE_DAYS") return (toInt(av) - toInt(bv)) * mult;
+
+    if (key === "SCORE_IA") {
+      const as = Number.isFinite(av) ? av : -1;
+      const bs = Number.isFinite(bv) ? bv : -1;
+      return (as - bs) * mult;
+    }
+
+    if (key === "DATA_CADASTRO") return (toDate(av) - toDate(bv)) * mult;
+
+    if (key === "MARCA") {
+      av = normalizeMarcaLabel(av);
+      bv = normalizeMarcaLabel(bv);
+    }
+
+    return String(av || "").localeCompare(String(bv || ""), "pt-BR", { sensitivity: "base" }) * mult;
+  };
+}
+
 function makeMultiComparatorWithScore(keys) {
   return (a, b) => {
     if (ENABLE_SCORE_IA) {
@@ -790,7 +639,7 @@ function makeMultiComparatorWithScore(keys) {
       if (k === "TOTAL_AGENDAMENTOS") {
         cmp = toInt(av) - toInt(bv);
       } else if (k === "DATA_CADASTRO") {
-        cmp = toDate(bv) - toDate(av); // desc
+        cmp = toDate(bv) - toDate(av); // desc por padrão
         if (dir === "asc") cmp = -cmp;
       } else {
         cmp = String(av || "").localeCompare(String(bv || ""), "pt-BR", { sensitivity: "base" });
@@ -803,43 +652,6 @@ function makeMultiComparatorWithScore(keys) {
 }
 
 /* =========================
-   Tabela
-========================= */
-function renderTabela(lista) {
-  const tbody = $("#tbody");
-
-  if (!lista.length) {
-    tbody.innerHTML = `<tr><td colspan="${ENABLE_SCORE_IA ? 13 : 12}" class="muted">Nenhum lead para este filtro.</td></tr>`;
-    return;
-  }
-
-  tbody.innerHTML = lista.map((l, i) => {
-    const wa = buildWhatsLink(l);
-    const status = normalizeStatus(l.STATUS_PENDENTE);
-    const marcaLabel = normalizeMarcaLabel(l.MARCA);
-    const days = Number.isFinite(l.AGE_DAYS) ? l.AGE_DAYS : "";
-
-    return `
-      <tr>
-        <td>${i + 1}</td>
-        <td>${escapeHtml(l.NOME || "")}</td>
-        <td>${escapeHtml(l.CPF || "")}</td>
-        <td>${escapeHtml(l.CURSO || "")}</td>
-        <td>${escapeHtml(l.MIDIA || "")}</td>
-        <td>${escapeHtml(marcaLabel || "")}</td>
-        <td>${escapeHtml(l.VENDEDOR || "")}</td>
-        <td>${escapeHtml(l.DATA_CADASTRO || "")}</td>
-        <td>${escapeHtml(String(days))}</td>
-        <td>${escapeHtml(String(toInt(l.TOTAL_AGENDAMENTOS)))}</td>
-        <td>${escapeHtml(status)}</td>
-        ${ENABLE_SCORE_IA ? `<td>${l.SCORE_IA != null ? Number(l.SCORE_IA).toFixed(3) : ""}</td>` : ""}
-        <td>${wa ? `<a href="${wa}" target="_blank">Whats</a>` : "-"}</td>
-      </tr>
-    `;
-  }).join("");
-}
-
-/* =========================
    Export CSV (lista atual)
 ========================= */
 function exportarListaCSV() {
@@ -848,20 +660,30 @@ function exportarListaCSV() {
   const headers = ["CPF","NOME","MARCA","CURSO","MIDIA","VENDEDOR","DATA_CADASTRO","IDADE_DIAS","TOTAL_AGENDAMENTOS","STATUS_PENDENTE","SCORE_IA"];
   const rows = [headers.join(",")];
 
-  for (const l of state.currentList) {
-    rows.push([
-      csvCell(l.CPF),
-      csvCell(l.NOME),
-      csvCell(normalizeMarcaLabel(l.MARCA)),
-      csvCell(l.CURSO),
-      csvCell(l.MIDIA),
-      csvCell(l.VENDEDOR),
-      csvCell(l.DATA_CADASTRO),
-      csvCell(String(l.AGE_DAYS ?? "")),
-      csvCell(String(toInt(l.TOTAL_AGENDAMENTOS))),
-      csvCell(normalizeStatus(l.STATUS_PENDENTE)),
-      csvCell(l.SCORE_IA != null ? String(Number(l.SCORE_IA).toFixed(3)) : "")
-    ].join(","));
+  // exporta na ordem renderizada (agrupada)
+  const groups = groupBy(state.currentList, (l) => (l.VENDEDOR || "").trim() || "(sem vendedor)");
+  const vendedores = Object.keys(groups).sort((a, b) => a.localeCompare(b, "pt-BR", { sensitivity: "base" }));
+
+  for (const v of vendedores) {
+    const list = groups[v] || [];
+    if (state.tableSort.key) list.sort(makeColumnComparator(state.tableSort.key, state.tableSort.dir));
+    else list.sort(makeMultiComparatorWithScore(state.prioridade));
+
+    for (const l of list) {
+      rows.push([
+        csvCell(l.CPF),
+        csvCell(l.NOME),
+        csvCell(normalizeMarcaLabel(l.MARCA)),
+        csvCell(l.CURSO),
+        csvCell(l.MIDIA),
+        csvCell(l.VENDEDOR),
+        csvCell(l.DATA_CADASTRO),
+        csvCell(String(l.AGE_DAYS ?? "")),
+        csvCell(String(toInt(l.TOTAL_AGENDAMENTOS))),
+        csvCell(normalizeStatus(l.STATUS_PENDENTE)),
+        csvCell(l.SCORE_IA != null ? String(Number(l.SCORE_IA).toFixed(3)) : "")
+      ].join(","));
+    }
   }
 
   const blob = new Blob([rows.join("\n")], { type: "text/csv;charset=utf-8" });
@@ -877,116 +699,6 @@ function csvCell(v) {
   const s = String(v ?? "");
   if (/[,"\n\r]/.test(s)) return `"${s.replaceAll('"', '""')}"`;
   return s;
-}
-
-/* =========================
-   Sugestão IA — cálculo
-========================= */
-function computeSuggestions(all) {
-  const out = { quick: null, hub: null };
-
-  const enriched = all.map(l => ({
-    ...l,
-    REC: recencyKeyFromAge(l.AGE_DAYS),
-    AGK: agendKeyFromN(toInt(l.TOTAL_AGENDAMENTOS)),
-    MK: normalizeMarcaKey(l.MARCA),
-    COURSE: normalizeText(l.CURSO),
-    MEDIA: normalizeText(l.MIDIA),
-    ISMAT: isMatriculado(l),
-  }));
-
-  out.quick = bestComboForRecency(enriched, "0_30");
-  out.hub = bestComboForRecency(enriched, "90P");
-
-  return out;
-}
-
-function bestComboForRecency(rows, recKey) {
-  const universe = rows.filter(r => r.REC === recKey && r.COURSE && r.MEDIA);
-  const nU = universe.length;
-  if (nU < 80) return null;
-
-  const matU = universe.reduce((acc, r) => acc + (r.ISMAT ? 1 : 0), 0);
-  const convU = (matU + 1) / (nU + 2);
-
-  const map = new Map();
-
-  for (const r of universe) {
-    const keys = [
-      `AMBOS|${r.COURSE}|${r.MEDIA}|${r.AGK}`,
-      `${r.MK}|${r.COURSE}|${r.MEDIA}|${r.AGK}`,
-    ];
-
-    for (const k of keys) {
-      const cur = map.get(k) || { n: 0, m: 0 };
-      cur.n += 1;
-      cur.m += (r.ISMAT ? 1 : 0);
-      map.set(k, cur);
-    }
-  }
-
-  let best = null;
-
-  for (const [k, v] of map.entries()) {
-    const n = v.n;
-    if (n < 30) continue;
-    const conv = (v.m + 1) / (n + 2);
-    const lift = conv / convU;
-
-    const parts = k.split("|");
-    const agk = parts[3];
-    const bonus = agk === "0_1" ? 1.08 : agk === "2_3" ? 1.00 : agk === "4P" ? 0.92 : 1.00;
-
-    const score = lift * Math.log10(n + 1) * bonus;
-
-    if (!best || score > best.score) best = { k, n, conv, lift, score };
-  }
-
-  if (!best) return null;
-
-  const [marcaKey, courseNorm, mediaNorm, agendKey] = best.k.split("|");
-  const pickCourse = firstLabel(universe, "CURSO", courseNorm) || courseNorm;
-  const pickMedia  = firstLabel(universe, "MIDIA", mediaNorm) || mediaNorm;
-
-  const comboText = [
-    `Recência: ${RECENCY_OPTIONS.find(o=>o.key===recKey)?.label || recKey}`,
-    marcaKey !== "AMBOS" ? `Marca: ${marcaKey === "TECNICO" ? "Técnico" : "Profissionalizante"}` : `Marca: Ambos`,
-    `Curso: ${pickCourse}`,
-    `Mídia: ${pickMedia}`,
-    `Agend.: ${AGEND_BUCKETS.find(o=>o.key===agendKey)?.label || agendKey}`
-  ].join(" • ");
-
-  return { recenciaKey: recKey, marcaKey, curso: pickCourse, midia: pickMedia, agendKey, n: best.n, conv: best.conv, lift: best.lift, comboText };
-}
-
-function firstLabel(universe, field, normValue) {
-  for (const r of universe) {
-    if (field === "CURSO" && normalizeText(r.CURSO) === normValue) return r.CURSO;
-    if (field === "MIDIA" && normalizeText(r.MIDIA) === normValue) return r.MIDIA;
-  }
-  return "";
-}
-
-/* =========================
-   Score IA (simples)
-========================= */
-function computeScoreIA(allLeads) {
-  const total = new Map();
-  const mat = new Map();
-
-  for (const l of allLeads) {
-    const key = `${normalizeText(l.MIDIA)}|${normalizeText(l.CURSO)}`;
-    total.set(key, (total.get(key) || 0) + 1);
-    if (isMatriculado(l)) mat.set(key, (mat.get(key) || 0) + 1);
-  }
-
-  for (const l of allLeads) {
-    const key = `${normalizeText(l.MIDIA)}|${normalizeText(l.CURSO)}`;
-    const taxa = (mat.get(key) || 0) / Math.max(1, total.get(key) || 0);
-    const ag = Math.max(0, toInt(l.TOTAL_AGENDAMENTOS));
-    const penal = 1 / (1 + ag);
-    l.SCORE_IA = taxa * 0.75 + penal * 0.25;
-  }
 }
 
 /* =========================
@@ -1093,14 +805,35 @@ function normalizeLead(r, idx) {
 }
 
 /* =========================
-   Rules / helpers
+   Score IA (simples)
+========================= */
+function computeScoreIA(allLeads) {
+  const total = new Map();
+  const mat = new Map();
+
+  for (const l of allLeads) {
+    const key = `${normalizeText(l.MIDIA)}|${normalizeText(l.CURSO)}`;
+    total.set(key, (total.get(key) || 0) + 1);
+    if (isMatriculado(l)) mat.set(key, (mat.get(key) || 0) + 1);
+  }
+
+  for (const l of allLeads) {
+    const key = `${normalizeText(l.MIDIA)}|${normalizeText(l.CURSO)}`;
+    const taxa = (mat.get(key) || 0) / Math.max(1, total.get(key) || 0);
+    const ag = Math.max(0, toInt(l.TOTAL_AGENDAMENTOS));
+    const penal = 1 / (1 + ag);
+    l.SCORE_IA = taxa * 0.75 + penal * 0.25;
+  }
+}
+
+/* =========================
+   Helpers / regras
 ========================= */
 function normalizeStatus(s) {
   return String(s || "").trim().toUpperCase().replace(/\s+/g, "");
 }
 
 function isMatriculado(l) {
-  // Regra definida por você:
   return normalizeStatus(l.STATUS_PENDENTE) === "FINALIZADOM";
 }
 
@@ -1184,6 +917,15 @@ function agendKeyFromN(n) {
   return "4P";
 }
 
+function groupBy(arr, fnKey) {
+  const m = {};
+  for (const x of arr) {
+    const k = fnKey(x);
+    (m[k] ||= []).push(x);
+  }
+  return m;
+}
+
 function unique(arr) { return [...new Set(arr)]; }
 function formatDateTime(d) { try { return d.toLocaleString("pt-BR"); } catch { return String(d); } }
 
@@ -1197,6 +939,9 @@ function escapeHtml(s) {
 }
 function escapeAttr(s) { return escapeHtml(s).replaceAll('"', "&quot;"); }
 
+/* =========================
+   Loading / error
+========================= */
 function renderLoading(msg) {
   const view = $("#view");
   if (!view) return;
@@ -1214,7 +959,7 @@ function renderError(err) {
     <div class="card">
       <h2 style="margin:0 0 8px 0;color:#8b0000;">Erro</h2>
       <div style="white-space:pre-wrap;font-family:monospace;font-size:12px;">${escapeHtml(String(err))}</div>
-      <div class="hSep"></div>
+      <div style="height:10px"></div>
       <button id="btnTentar" class="btn btnGhost">Tentar novamente</button>
     </div>
   `;
@@ -1223,6 +968,3 @@ function renderError(err) {
     renderRoute();
   });
 }
-
-function fmtPct(x) { const v = Number(x || 0); return (v * 100).toFixed(1) + "%"; }
-function fmtX(x) { const v = Number(x || 0); return v.toFixed(2) + "x"; }
