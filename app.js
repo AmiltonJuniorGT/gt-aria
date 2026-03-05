@@ -847,6 +847,819 @@ function csvEscape(v) {
     return `"${s.replaceAll('"','""')}"`;
   }
   return s;
+}
+  vendedores: [],
+
+  filtroMarca: "TODAS",
+  filtroVendedor: "TODOS",
+  filtroBusca: "",
+  filtroJanela: "365",
+  filtroDiasCustom: 120,
+  filtroRecenciaFaixa: "TODOS",
+  filtroAgendFaixa: "TODOS",
+  statusSelecionados: new Set(["AGENDADO"]),
+
+  prioridade: [...DEFAULT_PRIORIDADE],
+  headerSort: { key: null, dir: "asc" },
+
+  ratesMidia: new Map(),
+  ratesCurso: new Map(),
+};
+
+const $ = (sel) => document.querySelector(sel);
+
+/* --------- ERROS GLOBAIS (pra não ficar branco) --------- */
+window.addEventListener("error", (ev) => {
+  try {
+    const msg = ev?.error?.message || ev?.message || String(ev);
+    renderFatalError("Erro JavaScript", msg);
+  } catch {}
+});
+
+window.addEventListener("unhandledrejection", (ev) => {
+  try {
+    const msg = ev?.reason?.message || String(ev?.reason || ev);
+    renderFatalError("Promise rejeitada", msg);
+  } catch {}
+});
+
+/* ------------------------------
+   INIT
+-------------------------------- */
+init();
+
+function init() {
+  window.addEventListener("hashchange", renderRoute);
+
+  window.addEventListener("load", async () => {
+    bindTopbar();
+    await boot();
+    renderRoute();
+  });
+
+  document.querySelectorAll("[data-route]").forEach((a) => {
+    a.addEventListener("click", () => {
+      location.hash = a.getAttribute("data-route");
+    });
+  });
+}
+
+function bindTopbar() {
+  $("#btnRecarregarTop")?.addEventListener("click", async () => {
+    await boot();
+    renderRoute();
+  });
+  $("#btnGerarTop")?.addEventListener("click", () => gerarLista());
+  $("#btnExportTop")?.addEventListener("click", () => exportarCSV());
+}
+
+async function boot() {
+  state.loading = true;
+  state.error = "";
+  renderLoading("Carregando dados do Google Sheets…");
+
+  try {
+    const csvText = await fetchCsvNoCache(SHEET_CSV_URL);
+    const rows = parseCSV(csvText);
+    const normalizedRows = rows.map(normalizeRowKeys);
+
+    state.all = normalizedRows.map((r, idx) => normalizeLead(r, idx));
+
+    state.vendedores = unique(
+      state.all.map((x) => (x.VENDEDOR || "").trim()).filter(Boolean)
+    ).sort((a,b)=>a.localeCompare(b,"pt-BR",{sensitivity:"base"}));
+
+    computeRates(state.all);
+
+    state.lastUpdated = new Date();
+    state.loading = false;
+    state.error = "";
+  } catch (e) {
+    state.loading = false;
+    state.error = String(e?.message || e);
+    renderError(state.error);
+  }
+}
+
+/* ------------------------------
+   ROUTES
+-------------------------------- */
+function renderRoute() {
+  const hash = location.hash || "#/qualificacao";
+
+  const crumbs = $("#crumbs");
+  if (crumbs) {
+    crumbs.textContent =
+      hash === "#/login"
+        ? "Login"
+        : hash === "#/funil"
+        ? "Funil Diário"
+        : "Tratamento de Leads • Qualificação";
+  }
+
+  if (hash === "#/login") return renderPlaceholder("Login (protótipo)");
+  if (hash === "#/funil") return renderPlaceholder("Funil Diário (protótipo)");
+  return renderQualificacao();
+}
+
+function renderPlaceholder(title) {
+  const view = $("#view");
+  view.innerHTML = `
+    <div class="section">
+      <h2 style="margin:0 0 8px 0;">${escapeHtml(title)}</h2>
+      <div style="color:var(--muted);font-weight:700">Tela em construção.</div>
+    </div>
+  `;
+}
+
+/* ------------------------------
+   QUALIFICAÇÃO
+-------------------------------- */
+function renderQualificacao() {
+  const view = $("#view");
+
+  if (state.loading) return renderLoading("Carregando…");
+  if (state.error) return renderError(state.error);
+
+  const baseFiltrada = applyFiltersBase(state.all);
+  state.filtered = baseFiltrada;
+
+  const totalBase = state.all.length;
+  const totalFiltrada = baseFiltrada.length;
+  const totalConv = baseFiltrada.filter(isConvertido).length;
+  const convRate = totalFiltrada ? (totalConv / totalFiltrada) : 0;
+
+  const ia = computeIASummary(baseFiltrada);
+
+  view.innerHTML = `
+    <div class="section">
+      <div class="hTitleRow">
+        <div>
+          <h1 class="hTitle">Qualificação de Leads (HUB)</h1>
+          <div class="hMeta">
+            Base: <b>${formatInt(totalBase)}</b> •
+            Base filtrada: <b>${formatInt(totalFiltrada)}</b> •
+            Matriculou (${CONVERSAO_STATUS}): <b>${formatInt(totalConv)}</b> •
+            Conversão: <b>${formatPct(convRate)}</b>
+            ${state.lastUpdated ? ` • Atualizado: <b>${formatDateTime(state.lastUpdated)}</b>` : ""}
+          </div>
+          <div class="hMeta" style="margin-top:6px;">
+            Partição fixa: <b>VENDEDOR</b> • Dentro do vendedor: ordenação hierárquica por camadas.
+          </div>
+        </div>
+      </div>
+
+      <div class="kpiGrid">
+        <div class="kpiCard">
+          <div class="kpiTitle">Base Total</div>
+          <div class="kpiValue">${formatInt(totalBase)}</div>
+        </div>
+        <div class="kpiCard">
+          <div class="kpiTitle">Base Filtrada</div>
+          <div class="kpiValue">${formatInt(totalFiltrada)}</div>
+        </div>
+        <div class="kpiCard">
+          <div class="kpiTitle">Matriculou (FinalizadoM)</div>
+          <div class="kpiValue">${formatInt(totalConv)}</div>
+        </div>
+        <div class="kpiCard">
+          <div class="kpiTitle">Conversão</div>
+          <div class="kpiValue">${formatPct(convRate)}</div>
+        </div>
+      </div>
+
+      <div class="filtersGrid">
+        <div class="field">
+          <div class="label">Marca</div>
+          <select id="selMarca">
+            <option value="TODAS">Ambos</option>
+            <option value="TECNICO">Técnico</option>
+            <option value="PROFISSIONALIZANTE">Profissionalizante</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <div class="label">Janela (tempo para trás)</div>
+          <select id="selJanela">
+            <option value="30">Últimos 30 dias</option>
+            <option value="90">Últimos 90 dias</option>
+            <option value="180">Últimos 180 dias</option>
+            <option value="365">Últimos 365 dias</option>
+            <option value="CUSTOM">Personalizado</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <div class="label">Dias (se personalizado)</div>
+          <input id="inpDias" type="number" min="1" step="1" value="${escapeAttr(String(state.filtroDiasCustom))}" />
+        </div>
+
+        <div class="field">
+          <div class="label">Vendedor</div>
+          <select id="selVendedor">
+            <option value="TODOS">Todos</option>
+            ${state.vendedores.map(v=>`<option value="${escapeAttr(v)}">${escapeHtml(v)}</option>`).join("")}
+          </select>
+        </div>
+
+        <div class="field">
+          <div class="label">Recência (faixa)</div>
+          <select id="selRecencia">
+            <option value="TODOS">Todos</option>
+            <option value="NOVOS_30">0–30 dias</option>
+            <option value="31_90">31–90 dias</option>
+            <option value="91_180">91–180 dias</option>
+            <option value="181_365">181–365 dias</option>
+            <option value="366_MAIS">+365 dias</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <div class="label">Agendamentos (faixa)</div>
+          <select id="selAgend">
+            <option value="TODOS">Todos</option>
+            <option value="0">0</option>
+            <option value="1">1</option>
+            <option value="2_3">2–3</option>
+            <option value="4_MAIS">4+</option>
+          </select>
+        </div>
+
+        <div class="field" style="grid-column: span 2;">
+          <div class="label">Buscar (CPF/Nome)</div>
+          <input id="inpBusca" placeholder="Digite CPF ou nome..." value="${escapeAttr(state.filtroBusca || "")}" />
+        </div>
+      </div>
+
+      <div class="inlineChecks">
+        <div style="font-weight:900;color:var(--muted)">Status (Planilha):</div>
+        ${renderStatusCheck("AGENDADO","Agendado")}
+        ${renderStatusCheck("FINALIZADOM","FinalizadoM")}
+        ${renderStatusCheck("FINALIZADO","Finalizado")}
+      </div>
+    </div>
+
+    <div class="section">
+      <h3 class="aiTitle">Sugestões da IA (baseado na janela/marca selecionadas)</h3>
+
+      <div class="aiGrid">
+        <div class="aiCard">
+          <div class="aiCardTitle">Ordem sugerida (dentro do vendedor)</div>
+          <div class="aiCardText">${escapeHtml(ia.ordemSugerida)}</div>
+        </div>
+
+        <div class="aiCard">
+          <div class="aiCardTitle">Top Mídias (conversão e volume)</div>
+          <div class="aiCardText">${escapeHtml(ia.topMidias)}</div>
+        </div>
+
+        <div class="aiCard">
+          <div class="aiCardTitle">Top Cursos (conversão e volume)</div>
+          <div class="aiCardText">${escapeHtml(ia.topCursos)}</div>
+        </div>
+      </div>
+
+      <div class="aiNote">
+        A IA sugere, mas quem decide é você (arraste a ordem abaixo).
+      </div>
+    </div>
+
+    <div class="section">
+      <h3 style="margin:0;font-weight:900;">Prioridade de Ordenação (arraste)</h3>
+      <div class="dragWrap" id="drag"></div>
+    </div>
+
+    <div class="section">
+      <div class="hTitleRow">
+        <div>
+          <h3 style="margin:0;font-weight:900;">Resultado</h3>
+          <div id="resultadoInfo" class="hMeta">Clique em <b>Gerar Lista</b>.</div>
+        </div>
+        <div class="topbarActions">
+          <button id="btnRecarregar" class="btn btnGhost">Recarregar</button>
+          <button id="btnGerarLista" class="btn btnPrimary">Gerar Lista</button>
+          <button id="btnExportar" class="btn btnGhost">Exportar (CSV)</button>
+        </div>
+      </div>
+      <div id="resultadoArea" style="margin-top:12px;"></div>
+    </div>
+  `;
+
+  // set valores
+  $("#selMarca").value = state.filtroMarca;
+  $("#selVendedor").value = state.filtroVendedor;
+  $("#selRecencia").value = state.filtroRecenciaFaixa;
+  $("#selAgend").value = state.filtroAgendFaixa;
+  $("#selJanela").value = (state.filtroJanela === "CUSTOM") ? "CUSTOM" : String(state.filtroJanela);
+
+  // binds
+  $("#selMarca").addEventListener("change", (e) => { state.filtroMarca = e.target.value; renderRoute(); });
+  $("#selVendedor").addEventListener("change", (e) => { state.filtroVendedor = e.target.value; renderRoute(); });
+  $("#inpBusca").addEventListener("input", (e) => { state.filtroBusca = e.target.value; });
+  $("#selRecencia").addEventListener("change", (e) => { state.filtroRecenciaFaixa = e.target.value; renderRoute(); });
+  $("#selAgend").addEventListener("change", (e) => { state.filtroAgendFaixa = e.target.value; renderRoute(); });
+  $("#selJanela").addEventListener("change", (e) => { state.filtroJanela = e.target.value === "CUSTOM" ? "CUSTOM" : Number(e.target.value); renderRoute(); });
+  $("#inpDias").addEventListener("change", (e) => { state.filtroDiasCustom = clampInt(e.target.value, 1, 99999, 120); renderRoute(); });
+
+  ["AGENDADO","FINALIZADOM","FINALIZADO"].forEach((k) => {
+    const el = document.querySelector(`#chk_${k}`);
+    if (!el) return;
+    el.checked = state.statusSelecionados.has(k);
+    el.addEventListener("change", () => {
+      if (el.checked) state.statusSelecionados.add(k);
+      else state.statusSelecionados.delete(k);
+      renderRoute();
+    });
+  });
+
+  renderDrag();
+
+  $("#btnGerarLista").addEventListener("click", gerarLista);
+  $("#btnRecarregar").addEventListener("click", async () => { await boot(); renderRoute(); });
+  $("#btnExportar").addEventListener("click", exportarCSV);
+}
+
+/* ------------------------------
+   LISTA (placeholder simples)
+   (mantém o app funcionando; depois refinamos seu modelo completo)
+-------------------------------- */
+function gerarLista() {
+  const area = $("#resultadoArea");
+  const info = $("#resultadoInfo");
+
+  let base = applyFiltersBase(state.all)
+    .filter((l) => state.statusSelecionados.has(normalizeStatus(l.STATUS_PENDENTE)));
+
+  const q = (state.filtroBusca || "").trim().toLowerCase();
+  if (q) base = base.filter((l)=> (String(l.CPF||"").toLowerCase().includes(q) || String(l.NOME||"").toLowerCase().includes(q)));
+
+  info.innerHTML = `Linhas: <b>${formatInt(base.length)}</b>`;
+  area.innerHTML = `
+    <div class="tableWrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>Nome</th><th>CPF</th><th>Curso</th><th>Mídia</th><th>Marca</th><th>Vendedor</th><th>Data Cad.</th><th>Agend.</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            base.slice(0,200).map((l,i)=>`
+              <tr>
+                <td>${i+1}</td>
+                <td>${escapeHtml(l.NOME||"")}</td>
+                <td>${escapeHtml(l.CPF||"")}</td>
+                <td>${escapeHtml(l.CURSO||"")}</td>
+                <td>${escapeHtml(l.MIDIA||"")}</td>
+                <td>${escapeHtml(l.MARCA||"")}</td>
+                <td>${escapeHtml(l.VENDEDOR||"")}</td>
+                <td>${escapeHtml(l.DATA_CADASTRO||"")}</td>
+                <td>${escapeHtml(String(toInt(l.TOTAL_AGENDAMENTOS)))}</td>
+                <td>${escapeHtml(l.STATUS_PENDENTE||"")}</td>
+              </tr>
+            `).join("")
+          }
+          ${base.length > 200 ? `<tr><td colspan="10" style="color:var(--muted);font-weight:800;">Mostrando 200 de ${formatInt(base.length)} (performance).</td></tr>` : ""}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function exportarCSV() {
+  const base = applyFiltersBase(state.all)
+    .filter((l) => state.statusSelecionados.has(normalizeStatus(l.STATUS_PENDENTE)));
+
+  const cols = ["MARCA","NOME","CPF","CURSO","MIDIA","VENDEDOR","DATA_CADASTRO","TOTAL_AGENDAMENTOS","STATUS_PENDENTE"];
+  const csv = [cols.join(","), ...base.map(l=>cols.map(c=>csvEscape(l[c])).join(","))].join("\n");
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `gt-aria_export_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* ------------------------------
+   IA (resumo simples)
+-------------------------------- */
+function computeRates(all) {
+  // (mantido; depois plugamos o score completo novamente)
+  const mid = new Map(), cur = new Map();
+  for (const l of all) {
+    addCount(mid, normKey(l.MIDIA||"(vazio)"), isConvertido(l));
+    addCount(cur, normKey(l.CURSO||"(vazio)"), isConvertido(l));
+  }
+  state.ratesMidia = toRateMap(mid);
+  state.ratesCurso = toRateMap(cur);
+}
+
+function computeIASummary(base) {
+  const total = base.length;
+  const conv = base.filter(isConvertido).length;
+  const rate = total ? conv/total : 0;
+  return {
+    ordemSugerida: "DATA_CADASTRO > TOTAL_AGENDAMENTOS > MIDIA > CURSO",
+    topMidias: `Conversão geral: ${formatPct(rate)} (base filtrada)`,
+    topCursos: `Matriculou: ${formatInt(conv)} de ${formatInt(total)}`,
+  };
+}
+
+/* ------------------------------
+   FILTROS (KPIs seguem filtros)
+-------------------------------- */
+function applyFiltersBase(all) {
+  let list = [...all];
+
+  if (state.filtroMarca !== "TODAS") {
+    const alvo = normKey(state.filtroMarca);
+    list = list.filter((l) => normKey(l.MARCA) === alvo);
+  }
+
+  if (state.filtroVendedor !== "TODOS") {
+    list = list.filter((l) => (l.VENDEDOR || "").trim() === state.filtroVendedor);
+  }
+
+  const janelaDias = (state.filtroJanela === "CUSTOM") ? state.filtroDiasCustom : Number(state.filtroJanela || 365);
+  list = list.filter((l) => {
+    const d = daysSince(l.DATA_CADASTRO);
+    return d >= 0 && d <= janelaDias;
+  });
+
+  list = list.filter((l) => {
+    const d = daysSince(l.DATA_CADASTRO);
+    switch (state.filtroRecenciaFaixa) {
+      case "NOVOS_30": return d <= 30;
+      case "31_90": return d >= 31 && d <= 90;
+      case "91_180": return d >= 91 && d <= 180;
+      case "181_365": return d >= 181 && d <= 365;
+      case "366_MAIS": return d >= 366;
+      default: return true;
+    }
+  });
+
+  list = list.filter((l) => {
+    const a = toInt(l.TOTAL_AGENDAMENTOS);
+    switch (state.filtroAgendFaixa) {
+      case "0": return a === 0;
+      case "1": return a === 1;
+      case "2_3": return a >= 2 && a <= 3;
+      case "4_MAIS": return a >= 4;
+      default: return true;
+    }
+  });
+
+  return list;
+}
+
+/* ------------------------------
+   DRAG
+-------------------------------- */
+function renderDrag() {
+  const drag = $("#drag");
+  drag.innerHTML = "";
+
+  state.prioridade.forEach((p) => {
+    const div = document.createElement("div");
+    div.className = "dragItem";
+    div.draggable = true;
+    div.textContent = p;
+    drag.appendChild(div);
+  });
+
+  enableDrag();
+}
+
+function enableDrag() {
+  const container = $("#drag");
+  const items = container.querySelectorAll(".dragItem");
+
+  items.forEach((item) => {
+    item.addEventListener("dragstart", () => item.classList.add("dragging"));
+    item.addEventListener("dragend", () => {
+      item.classList.remove("dragging");
+      state.prioridade = [...container.querySelectorAll(".dragItem")].map((el) => el.textContent.trim());
+    });
+  });
+
+  container.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    const dragging = container.querySelector(".dragging");
+    if (!dragging) return;
+
+    const after = getDragAfterElement(container, e.clientY);
+    if (after == null) container.appendChild(dragging);
+    else container.insertBefore(dragging, after);
+  });
+}
+
+function getDragAfterElement(container, y) {
+  const els = [...container.querySelectorAll(".dragItem:not(.dragging)")];
+  return els.reduce(
+    (closest, child) => {
+      const box = child.getBoundingClientRect();
+      const offset = y - box.top - box.height / 2;
+      if (offset < 0 && offset > closest.offset) return { offset, element: child };
+      return closest;
+    },
+    { offset: Number.NEGATIVE_INFINITY, element: null }
+  ).element;
+}
+
+/* ------------------------------
+   CSV FETCH + PARSE
+-------------------------------- */
+async function fetchCsvNoCache(url) {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(
+      "Erro ao carregar CSV. Confirme se a planilha está pública (qualquer pessoa com link) e se o gid é da aba correta."
+    );
+  }
+  return await res.text();
+}
+
+function parseCSV(text) {
+  text = text.replace(/^\uFEFF/, "");
+
+  const rows = [];
+  let cur = [];
+  let field = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const next = text[i + 1];
+
+    if (inQuotes) {
+      if (c === '"' && next === '"') { field += '"'; i++; }
+      else if (c === '"') inQuotes = false;
+      else field += c;
+      continue;
+    }
+
+    if (c === '"') { inQuotes = true; continue; }
+    if (c === ",") { cur.push(field); field = ""; continue; }
+    if (c === "\n") { cur.push(field); field = ""; rows.push(cur); cur = []; continue; }
+    if (c === "\r") continue;
+    field += c;
+  }
+
+  if (field.length || cur.length) { cur.push(field); rows.push(cur); }
+
+  const clean = rows.filter((r) => r.some((x) => String(x || "").trim().length));
+  if (!clean.length) return [];
+
+  const headers = clean[0].map((h) => String(h || "").trim());
+  return clean.slice(1).map((r) => {
+    const obj = {};
+    headers.forEach((h, idx) => { obj[h] = r[idx] != null ? String(r[idx]) : ""; });
+    return obj;
+  });
+}
+
+function normalizeRowKeys(row) {
+  const out = { __raw: row };
+  Object.keys(row).forEach((k) => { out[normalizeKey(k)] = row[k]; });
+  return out;
+}
+
+function normalizeKey(k) {
+  return String(k || "")
+    .trim()
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, "_");
+}
+
+/* ------------------------------
+   NORMALIZAÇÃO LEAD
+-------------------------------- */
+function normalizeLead(r, idx) {
+  const get = (...keys) => {
+    for (const k of keys) {
+      const nk = normalizeKey(k);
+      if (r[nk] != null && String(r[nk]).trim() !== "") return r[nk];
+    }
+    if (r.__raw) {
+      for (const k of keys) {
+        if (r.__raw[k] != null && String(r.__raw[k]).trim() !== "") return r.__raw[k];
+      }
+    }
+    return "";
+  };
+
+  return {
+    ID: idx + 1,
+    MARCA: get("MARCA"),
+    NOME: get("NOME", "NOME_LEAD", "ALUNO", "NOME_COMPLETO"),
+    CURSO: get("CURSO", "CURSO_INTERESSE", "CURSO_DE_INTERESSE"),
+    MIDIA: get("MIDIA", "MÍDIA", "ORIGEM", "FONTE", "CANAL"),
+    CPF: get("CPF"),
+    VENDEDOR: get("VENDEDOR", "CONSULTOR", "RESPONSAVEL"),
+    DATA_CADASTRO: get("DATA_CADASTRO", "DT_CADASTRO", "DATA_DE_CADASTRO"),
+    DATA_AGENDAMENTO: get("DATA_AGENDAMENTO", "DT_AGENDAMENTO"),
+    TOTAL_AGENDAMENTOS: toInt(get("TOTAL_AGENDAMENTOS", "AGENDAMENTOS", "QTD_AGENDAMENTOS")),
+    STATUS_PENDENTE: get("STATUS_PENDENTE", "STATUS_PENDENCIA", "STATUS"),
+    FONE: get("FONE"),
+    FONE2: get("FONE2"),
+    FONE3: get("FONE3"),
+  };
+}
+
+function normalizeStatus(v) {
+  return String(v||"").trim().toUpperCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .replace(/\s+/g,"");
+}
+
+function isConvertido(l) {
+  return normalizeStatus(l.STATUS_PENDENTE) === CONVERSAO_STATUS;
+}
+
+/* ------------------------------
+   RENDER HELPERS
+-------------------------------- */
+function renderLoading(msg) {
+  const view = $("#view");
+  if (!view) return;
+  view.innerHTML = `
+    <div class="section">
+      <div style="font-weight:900;font-size:16px;margin-bottom:6px;">${escapeHtml(msg || "Carregando…")}</div>
+      <div style="color:var(--muted);font-weight:700;">Aguarde.</div>
+    </div>
+  `;
+}
+
+function renderError(err) {
+  const view = $("#view");
+  if (!view) return;
+  view.innerHTML = `
+    <div class="section">
+      <h2 style="margin:0 0 8px 0;color:#8b0000;">Erro</h2>
+      <div style="white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px;">${escapeHtml(String(err))}</div>
+      <div style="margin-top:10px;color:var(--muted);font-weight:700;">
+        Dica: planilha deve estar <b>pública</b> ou “qualquer pessoa com link”.
+      </div>
+    </div>
+  `;
+}
+
+function renderFatalError(title, msg) {
+  const view = document.getElementById("view");
+  if (!view) return;
+  view.innerHTML = `
+    <div class="section">
+      <h2 style="margin:0 0 8px 0;color:#8b0000;">${escapeHtml(title)}</h2>
+      <div style="white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px;">${escapeHtml(msg)}</div>
+    </div>
+  `;
+}
+
+/* ------------------------------
+   STATUS CHECK
+-------------------------------- */
+function renderStatusCheck(key, label) {
+  const checked = state.statusSelecionados.has(key) ? "checked" : "";
+  return `
+    <label class="chk">
+      <input type="checkbox" id="chk_${escapeAttr(key)}" ${checked} />
+      <span>${escapeHtml(label)}</span>
+    </label>
+  `;
+}
+
+/* ------------------------------
+   UTILS
+-------------------------------- */
+function toInt(v) {
+  const n = parseInt(String(v || "").replace(/[^\d-]/g, ""), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function toDate(v) {
+  const s = String(v || "").trim();
+  if (!s) return new Date("1970-01-01").getTime();
+
+  const iso = Date.parse(s);
+  if (!Number.isNaN(iso)) return iso;
+
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m) {
+    const dd = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10) - 1;
+    let yy = parseInt(m[3], 10);
+    if (yy < 100) yy += 2000;
+    const hh = parseInt(m[4] || "0", 10);
+    const mi = parseInt(m[5] || "0", 10);
+    const ss = parseInt(m[6] || "0", 10);
+    return new Date(yy, mm, dd, hh, mi, ss).getTime();
+  }
+
+  return new Date("1970-01-01").getTime();
+}
+
+function daysSince(dateStr) {
+  const t = toDate(dateStr);
+  const now = Date.now();
+  const d = Math.floor((now - t) / (1000 * 60 * 60 * 24));
+  return Number.isFinite(d) ? Math.max(0, d) : 999999;
+}
+
+function unique(arr) { return [...new Set(arr)]; }
+
+function formatDateTime(d) {
+  try { return d.toLocaleString("pt-BR"); } catch { return String(d); }
+}
+function formatInt(n) { return Number(n || 0).toLocaleString("pt-BR"); }
+function formatPct(x) { return ((Number(x || 0) * 100).toFixed(1) + "%"); }
+
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+function escapeAttr(s) { return escapeHtml(s).replaceAll('"', "&quot;"); }
+function clampInt(v, a, b, def) {
+  const n = parseInt(String(v||""),10);
+  return Number.isFinite(n) ? Math.max(a, Math.min(b, n)) : def;
+}
+function normKey(v){
+  return String(v||"").trim().toUpperCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .replace(/\s+/g," ");
+}
+
+/* ------------------------------
+   MAPS
+-------------------------------- */
+function addCount(map, key, isConv) {
+  const cur = map.get(key) || { t: 0, c: 0 };
+  cur.t += 1;
+  if (isConv) cur.c += 1;
+  map.set(key, cur);
+}
+function toRateMap(countMap) {
+  const out = new Map();
+  for (const [k, v] of countMap.entries()) {
+    out.set(normKey(k), v.c / Math.max(1, v.t));
+  }
+  return out;
+}
+
+/* ------------------------------
+   DRAG (UI)
+-------------------------------- */
+function enableDrag() {
+  const container = $("#drag");
+  const items = container.querySelectorAll(".dragItem");
+
+  items.forEach((item) => {
+    item.addEventListener("dragstart", () => item.classList.add("dragging"));
+    item.addEventListener("dragend", () => {
+      item.classList.remove("dragging");
+      state.prioridade = [...container.querySelectorAll(".dragItem")].map((el) => el.textContent.trim());
+    });
+  });
+
+  container.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    const dragging = container.querySelector(".dragging");
+    if (!dragging) return;
+
+    const after = getDragAfterElement(container, e.clientY);
+    if (after == null) container.appendChild(dragging);
+    else container.insertBefore(dragging, after);
+  });
+}
+
+function getDragAfterElement(container, y) {
+  const els = [...container.querySelectorAll(".dragItem:not(.dragging)")];
+  return els.reduce(
+    (closest, child) => {
+      const box = child.getBoundingClientRect();
+      const offset = y - box.top - box.height / 2;
+      if (offset < 0 && offset > closest.offset) return { offset, element: child };
+      return closest;
+    },
+    { offset: Number.NEGATIVE_INFINITY, element: null }
+  ).element;
+}
+
+function csvEscape(v) {
+  const s = String(v ?? "");
+  if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+    return `"${s.replaceAll('"','""')}"`;
+  }
+  return s;
 }  "CURSO",                  // melhor conversão primeiro (IA)
 ];
 
