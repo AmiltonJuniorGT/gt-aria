@@ -1,40 +1,58 @@
-/* ================================
-   GT ARIA — HUB Comercial (Qualificação)
-   1) Carrega CSV do Google Sheets (gviz + fallback export)
-   2) Filtros: MARCA, VENDEDOR, STATUS_PENDENTE, janela DATA_CADASTRO, busca CPF/Nome
-   3) Classificação hierárquica por camadas (dentro do vendedor)
-   4) Sugestões IA (conversão por MIDIA/CURSO) com janela escolhida
-   5) Ordenar por coluna clicando no header
-=================================== */
+console.log("ARIA HUB carregando...");
 
-/** ====== CONFIG: SUA PLANILHA ====== */
+// ===== CONFIG =====
 const SHEET_ID = "1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI";
 const GID = "1731723852";
 
-/** Score/IA */
-const ENABLE_IA = true;
+const CSV_URL =
+`https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID}`;
 
-/** Ordem padrão dentro do vendedor (arrastável) */
-const DEFAULT_PRIORIDADE = ["DATA_CADASTRO", "TOTAL_AGENDAMENTOS", "MIDIA", "CURSO"];
 
-/** Direções padrão por campo */
-const SORT_DIR = {
-  DATA_CADASTRO: "desc",
-  TOTAL_AGENDAMENTOS: "asc",
-  MIDIA: "desc", // aqui vamos usar conversão (IA) quando existir
-  CURSO: "desc", // idem
+// ===== FETCH CSV =====
+async function carregarDados() {
+
+  try {
+
+    const resp = await fetch(CSV_URL);
+    const texto = await resp.text();
+
+    const linhas = texto.split("\n").map(l => l.split(","));
+
+    console.log("Linhas carregadas:", linhas.length);
+
+    document.getElementById("crumbs").innerText =
+      "Base carregada: " + (linhas.length - 1) + " leads";
+
+  } catch (erro) {
+
+    console.error("Erro ao carregar CSV", erro);
+
+    document.getElementById("crumbs").innerText =
+      "Erro ao carregar base";
+
+  }
+
+}
+
+
+// ===== BOTÕES =====
+
+document.getElementById("btnRecarregarTop").onclick = carregarDados;
+
+document.getElementById("btnGerarTop").onclick = () => {
+  console.log("Gerar lista clicado");
 };
 
-const state = {
-  loading: false,
-  error: "",
+document.getElementById("btnExportTop").onclick = () => {
+  window.open(CSV_URL);
+};
 
-  lastUpdated: null,
 
-  all: [],
-  leads: [],
+// ===== START =====
 
-  vendedores: [],
+window.onload = () => {
+  carregarDados();
+};  vendedores: [],
   vendedorSelecionado: "TODOS",
 
   marcaSelecionada: "AMBOS", // AMBOS | TECNICO | PROFISSIONALIZANTE
