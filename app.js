@@ -1,40 +1,1009 @@
 /* ================================
    GT ARIA — HUB Comercial (Qualificação)
-   - Erros globais aparecem na tela (não fica branco)
-   - Detecta app.js carregado (index.html mostra erro se não carregar)
+   1) Carrega CSV do Google Sheets (gviz + fallback export)
+   2) Filtros: MARCA, VENDEDOR, STATUS_PENDENTE, janela DATA_CADASTRO, busca CPF/Nome
+   3) Classificação hierárquica por camadas (dentro do vendedor)
+   4) Sugestões IA (conversão por MIDIA/CURSO) com janela escolhida
+   5) Ordenar por coluna clicando no header
 =================================== */
 
-window.__APPJS_OK__ = true;
+/** ====== CONFIG: SUA PLANILHA ====== */
+const SHEET_ID = "1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI";
+const GID = "1731723852";
 
-/** ✅ SUA BASE ATUAL (CSV via gviz) */
-const SHEET_CSV_URL =
-  "https://docs.google.com/spreadsheets/d/1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI/gviz/tq?tqx=out:csv&gid=1731723852";
+/** Score/IA */
+const ENABLE_IA = true;
 
-const CONVERSAO_STATUS = "FINALIZADOM"; // STATUS_PENDENTE == FinalizadoM
-
+/** Ordem padrão dentro do vendedor (arrastável) */
 const DEFAULT_PRIORIDADE = ["DATA_CADASTRO", "TOTAL_AGENDAMENTOS", "MIDIA", "CURSO"];
 
+/** Direções padrão por campo */
 const SORT_DIR = {
   DATA_CADASTRO: "desc",
   TOTAL_AGENDAMENTOS: "asc",
-  MIDIA: "desc",
-  CURSO: "desc",
-  NOME: "asc",
-  CPF: "asc",
-  MARCA: "asc",
-  VENDEDOR: "asc",
-  STATUS_PENDENTE: "asc",
-  SCORE: "desc",
+  MIDIA: "desc", // aqui vamos usar conversão (IA) quando existir
+  CURSO: "desc", // idem
 };
 
 const state = {
   loading: false,
   error: "",
+
   lastUpdated: null,
 
   all: [],
-  filtered: [],
+  leads: [],
 
+  vendedores: [],
+  vendedorSelecionado: "TODOS",
+
+  marcaSelecionada: "AMBOS", // AMBOS | TECNICO | PROFISSIONALIZANTE
+
+  // STATUS_PENDENTE filtro (multi)
+  statusSel: {
+    AGENDADO: true,
+    FINALIZADOM: false,
+    FINALIZADO: false,
+  },
+
+  // janela data (tempo p/ trás) para filtros + IA
+  janelaDiasPreset: "365", // 30 | 90 | 180 | 365 | custom
+  janelaDiasCustom: 120,
+
+  // busca
+  busca: "",
+
+  // prioridade arrastável
+  prioridade: [...DEFAULT_PRIORIDADE],
+
+  // rates IA (conversão)
+  ratesMidia: new Map(),
+  ratesCurso: new Map(),
+
+  // ordenação por clique no cabeçalho
+  tableSort: { key: "", dir: "" }, // dir: asc|desc|""
+};
+
+const $ = (sel) => document.querySelector(sel);
+
+init();
+
+/* ------------------------------
+   ROUTER + INIT
+-------------------------------- */
+function init() {
+  window.addEventListener("hashchange", renderRoute);
+  window.addEventListener("load", async () => {
+    await boot();
+    renderRoute();
+  });
+
+  document.querySelectorAll("[data-route]").forEach((a) => {
+    a.addEventListener("click", () => (location.hash = a.getAttribute("data-route")));
+  });
+}
+
+function renderRoute() {
+  const hash = location.hash || "#/qualificacao";
+  const crumbs = $("#crumbs");
+  if (crumbs) {
+    crumbs.textContent =
+      hash === "#/login" ? "Login" :
+      hash === "#/funil" ? "Funil Diário" :
+      "Tratamento de Leads • Qualificação";
+  }
+
+  // topo: botões sempre presentes
+  bindTopbar();
+
+  if (hash === "#/login") return renderPlaceholder("Login (protótipo)");
+  if (hash === "#/funil") return renderPlaceholder("Funil Diário (protótipo)");
+  return renderQualificacao();
+}
+
+function bindTopbar() {
+  // bind seguro (não quebra se faltar)
+  const btnR = $("#btnRecarregarTop");
+  const btnG = $("#btnGerarTop");
+  const btnE = $("#btnExportTop");
+
+  if (btnR && !btnR.__bound) {
+    btnR.__bound = true;
+    btnR.addEventListener("click", async () => {
+      await boot();
+      renderRoute();
+    });
+  }
+
+  if (btnG && !btnG.__bound) {
+    btnG.__bound = true;
+    btnG.addEventListener("click", () => gerarLista());
+  }
+
+  if (btnE && !btnE.__bound) {
+    btnE.__bound = true;
+    btnE.addEventListener("click", () => exportarCsv());
+  }
+}
+
+function renderPlaceholder(title) {
+  const view = $("#view");
+  view.innerHTML = `
+    <div class="card">
+      <h2 style="margin:0 0 8px 0;">${escapeHtml(title)}</h2>
+      <div style="opacity:.8;font-weight:800;">Tela em construção.</div>
+    </div>
+  `;
+}
+
+/* ------------------------------
+   BOOT (CSV)
+-------------------------------- */
+async function boot() {
+  state.loading = true;
+  state.error = "";
+  state.lastUpdated = null;
+  renderLoading("Carregando base do Google Sheets…");
+
+  try {
+    const csvText = await fetchSheetsCsvRobusto(SHEET_ID, GID);
+    const rows = parseCSV(csvText);
+
+    const normalizedRows = rows.map(normalizeRowKeys);
+    state.all = normalizedRows.map((r, idx) => normalizeLead(r, idx));
+
+    // vendedores
+    state.vendedores = unique(
+      state.all.map((l) => l.VENDEDOR).filter(Boolean).map((v) => String(v).trim()).filter(Boolean)
+    ).sort((a,b)=>a.localeCompare(b,"pt-BR",{sensitivity:"base"}));
+
+    state.lastUpdated = new Date();
+    state.loading = false;
+    state.error = "";
+
+    // recomputa IA sempre com a janela atual
+    if (ENABLE_IA) computeIA();
+  } catch (e) {
+    state.loading = false;
+    state.error = String(e?.message || e);
+  }
+}
+
+/** gviz + fallback export (mais resistente) */
+async function fetchSheetsCsvRobusto(sheetId, gid) {
+  const urlGviz = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&gid=${gid}`;
+  const urlExport = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}`;
+
+  // tenta gviz
+  try {
+    return await fetchTextNoCache(urlGviz);
+  } catch {
+    // tenta export
+    return await fetchTextNoCache(urlExport);
+  }
+}
+
+async function fetchTextNoCache(url) {
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(`Erro ao buscar CSV (${res.status}). Confirme se a planilha está pública.`);
+  return await res.text();
+}
+
+/* ------------------------------
+   UI — QUALIFICAÇÃO
+-------------------------------- */
+function renderQualificacao() {
+  const view = $("#view");
+  if (state.loading) return renderLoading("Carregando…");
+  if (state.error) return renderError(state.error);
+
+  // KPIs iniciais (antes de gerar lista, seguem filtros)
+  const filtered = aplicarFiltrosBase(state.all);
+  const kpis = calcKpis(filtered);
+
+  view.innerHTML = `
+    <div class="card">
+      <div class="hRow">
+        <div>
+          <h1 class="hTitle">Qualificação de Leads (HUB)</h1>
+          <div class="hSub">
+            Base: <b>${fmtInt(state.all.length)}</b> •
+            Dentro dos filtros: <b>${fmtInt(filtered.length)}</b> •
+            Matriculou (FinalizadoM): <b>${fmtInt(kpis.matriculou)}</b> •
+            Atualizado: <b>${state.lastUpdated ? formatDateTime(state.lastUpdated) : "—"}</b>
+          </div>
+          <div class="smallNote">
+            Partição fixa: <b>VENDEDOR</b> • Dentro do vendedor: ordenação hierárquica por camadas.
+          </div>
+        </div>
+      </div>
+
+      <div class="gridKpis">
+        <div class="kpi"><div class="k">Base Total (planilha)</div><div class="v">${fmtInt(state.all.length)}</div></div>
+        <div class="kpi"><div class="k">Dentro dos filtros</div><div class="v">${fmtInt(filtered.length)}</div></div>
+        <div class="kpi"><div class="k">Matriculou (FinalizadoM)</div><div class="v">${fmtInt(kpis.matriculou)}</div></div>
+      </div>
+
+      <div class="filters">
+        <div class="fItem">
+          <label>Marca</label>
+          <select id="selMarca">
+            <option value="AMBOS">Ambos</option>
+            <option value="TECNICO">Técnico</option>
+            <option value="PROFISSIONALIZANTE">Profissionalizante</option>
+          </select>
+        </div>
+
+        <div class="fItem">
+          <label>Vendedor</label>
+          <select id="selVendedor">
+            <option value="TODOS">Todos</option>
+            ${state.vendedores.map(v => `<option value="${escapeAttr(v)}">${escapeHtml(v)}</option>`).join("")}
+          </select>
+        </div>
+
+        <div class="fItem">
+          <label>Janela (tempo para trás)</label>
+          <select id="selJanela">
+            <option value="30">Últimos 30 dias</option>
+            <option value="90">Últimos 90 dias</option>
+            <option value="180">Últimos 180 dias</option>
+            <option value="365">Últimos 365 dias</option>
+            <option value="custom">Personalizado</option>
+          </select>
+        </div>
+
+        <div class="fItem">
+          <label>Dias (se personalizado)</label>
+          <input id="inpDias" type="number" min="1" step="1" value="${escapeAttr(String(state.janelaDiasCustom))}" />
+        </div>
+
+        <div class="fItem" style="grid-column: span 2;">
+          <label>Buscar (CPF/Nome)</label>
+          <input id="inpBusca" type="text" placeholder="Digite CPF ou nome..." />
+        </div>
+      </div>
+
+      <div class="checkRow">
+        <span class="lbl">Status (Planilha):</span>
+
+        <label class="chk"><input type="checkbox" id="chkAgendado"> Agendado</label>
+        <label class="chk"><input type="checkbox" id="chkFinalizadoM"> FinalizadoM</label>
+        <label class="chk"><input type="checkbox" id="chkFinalizado"> Finalizado</label>
+      </div>
+    </div>
+
+    ${ENABLE_IA ? renderIASection() : ""}
+
+    <div class="card dragWrap">
+      <div class="dragTitle">Prioridade de Ordenação (arraste)</div>
+      <div class="smallNote">
+        <b>VENDEDOR</b> é sempre a partição fixa (não entra no arraste). Dentro do vendedor, a lista segue a ordem abaixo.
+      </div>
+      <div id="drag" class="drag"></div>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
+      <div class="hRow">
+        <div style="font-weight:1000;font-size:18px;">Resultado</div>
+        <div id="resultadoInfo" class="smallNote">Clique em <b>Gerar Lista</b> (topo).</div>
+      </div>
+
+      <div class="tableWrap">
+        <table id="tbl">
+          <thead>
+            <tr>
+              <th data-key="IDX">#</th>
+              <th data-key="NOME">Nome</th>
+              <th data-key="CPF">CPF</th>
+              <th data-key="CURSO">Curso</th>
+              <th data-key="MIDIA">Mídia</th>
+              <th data-key="VENDEDOR">Vendedor</th>
+              <th data-key="DATA_CADASTRO">Data Cad.</th>
+              <th data-key="TOTAL_AGENDAMENTOS">Agend.</th>
+              <th data-key="STATUS_PENDENTE">Status</th>
+              ${ENABLE_IA ? `<th data-key="SCORE_IA">Score IA</th>` : ``}
+            </tr>
+          </thead>
+          <tbody id="tbody">
+            <tr><td colspan="${ENABLE_IA ? 10 : 9}" style="opacity:.7;font-weight:800;padding:16px;">Clique em <b>Gerar Lista</b>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="smallNote">
+        Dica: você pode ordenar clicando no cabeçalho da tabela (toggle asc/desc). Para voltar à ordem do arraste, clique no mesmo cabeçalho até “limpar”.
+      </div>
+    </div>
+  `;
+
+  // set selects/inputs atuais
+  $("#selMarca").value = state.marcaSelecionada;
+  $("#selVendedor").value = state.vendedorSelecionado;
+  $("#selJanela").value = state.janelaDiasPreset;
+  $("#inpDias").disabled = state.janelaDiasPreset !== "custom";
+  $("#inpBusca").value = state.busca || "";
+
+  // checks
+  $("#chkAgendado").checked = !!state.statusSel.AGENDADO;
+  $("#chkFinalizadoM").checked = !!state.statusSel.FINALIZADOM;
+  $("#chkFinalizado").checked = !!state.statusSel.FINALIZADO;
+
+  // binds filtros
+  $("#selMarca").addEventListener("change", (e) => { state.marcaSelecionada = e.target.value; refreshIA(); refreshKpisOnly(); });
+  $("#selVendedor").addEventListener("change", (e) => { state.vendedorSelecionado = e.target.value; refreshKpisOnly(); });
+
+  $("#selJanela").addEventListener("change", (e) => {
+    state.janelaDiasPreset = e.target.value;
+    $("#inpDias").disabled = state.janelaDiasPreset !== "custom";
+    refreshIA();
+    refreshKpisOnly();
+  });
+
+  $("#inpDias").addEventListener("input", (e) => {
+    state.janelaDiasCustom = clampInt(e.target.value, 1, 3650);
+    refreshIA();
+    refreshKpisOnly();
+  });
+
+  $("#inpBusca").addEventListener("input", (e) => {
+    state.busca = String(e.target.value || "");
+    refreshKpisOnly();
+  });
+
+  $("#chkAgendado").addEventListener("change", (e) => { state.statusSel.AGENDADO = e.target.checked; refreshKpisOnly(); refreshIA(); });
+  $("#chkFinalizadoM").addEventListener("change", (e) => { state.statusSel.FINALIZADOM = e.target.checked; refreshKpisOnly(); refreshIA(); });
+  $("#chkFinalizado").addEventListener("change", (e) => { state.statusSel.FINALIZADO = e.target.checked; refreshKpisOnly(); refreshIA(); });
+
+  // drag
+  renderDrag();
+
+  // sortable table headers
+  bindTableHeaders();
+}
+
+function refreshKpisOnly(){
+  // só re-renderiza a rota (mais simples e consistente)
+  // mantendo tabela ainda não gerada
+  renderRoute();
+}
+
+function renderIASection(){
+  const ia = buildIASummary();
+  return `
+    <div class="cardsAI">
+      <div class="aiCard">
+        <h4>Ordem sugerida (IA)</h4>
+        <div class="big">${escapeHtml(ia.ordem)}</div>
+        <div class="list">A IA sugere, mas quem decide é você (arraste abaixo).</div>
+      </div>
+
+      <div class="aiCard">
+        <h4>Top Mídias (conversão)</h4>
+        <div class="list">${escapeHtml(ia.topMidias)}</div>
+      </div>
+
+      <div class="aiCard">
+        <h4>Top Cursos (conversão)</h4>
+        <div class="list">${escapeHtml(ia.topCursos)}</div>
+      </div>
+    </div>
+  `;
+}
+
+function refreshIA(){
+  if (!ENABLE_IA) return;
+  computeIA();
+}
+
+/* ------------------------------
+   DRAG & DROP
+-------------------------------- */
+function renderDrag() {
+  const drag = $("#drag");
+  drag.innerHTML = "";
+
+  state.prioridade.forEach((p) => {
+    const div = document.createElement("div");
+    div.className = "dragItem";
+    div.draggable = true;
+    div.textContent = p;
+    drag.appendChild(div);
+  });
+
+  enableDrag();
+}
+
+function enableDrag() {
+  const container = $("#drag");
+  const items = container.querySelectorAll(".dragItem");
+
+  items.forEach((item) => {
+    item.addEventListener("dragstart", () => item.classList.add("dragging"));
+    item.addEventListener("dragend", () => {
+      item.classList.remove("dragging");
+      state.prioridade = [...container.querySelectorAll(".dragItem")].map((el) => el.textContent.trim());
+    });
+  });
+
+  container.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    const dragging = container.querySelector(".dragging");
+    if (!dragging) return;
+
+    const after = getDragAfterElement(container, e.clientY);
+    if (after == null) container.appendChild(dragging);
+    else container.insertBefore(dragging, after);
+  });
+}
+
+function getDragAfterElement(container, y) {
+  const els = [...container.querySelectorAll(".dragItem:not(.dragging)")];
+  return els.reduce(
+    (closest, child) => {
+      const box = child.getBoundingClientRect();
+      const offset = y - box.top - box.height / 2;
+      if (offset < 0 && offset > closest.offset) return { offset, element: child };
+      return closest;
+    },
+    { offset: Number.NEGATIVE_INFINITY, element: null }
+  ).element;
+}
+
+/* ------------------------------
+   GERAR LISTA
+-------------------------------- */
+function gerarLista() {
+  const base = aplicarFiltrosBase(state.all);
+
+  // ordenação hierárquica por vendedor + camadas
+  const sorted = sortHierarquicoPorVendedor(base, state.prioridade);
+
+  // se usuário clicou em coluna: aplica override
+  const finalList = applyTableSortOverride(sorted);
+
+  renderTabela(finalList);
+
+  const info = $("#resultadoInfo");
+  if (info) {
+    const ordem = `VENDEDOR > ${state.prioridade.join(" > ")}`;
+    info.textContent = `Linhas: ${finalList.length} • Ordem: ${ordem}${state.tableSort.key ? ` • (Override: ${state.tableSort.key} ${state.tableSort.dir})` : ""}`;
+  }
+}
+
+function aplicarFiltrosBase(rows){
+  const janelaDias = getJanelaDias();
+  const minDate = Date.now() - janelaDias * 24*60*60*1000;
+
+  const marcaSel = state.marcaSelecionada; // AMBOS | TECNICO | PROFISSIONALIZANTE
+  const vendSel = state.vendedorSelecionado;
+  const q = normalizeSearch(state.busca);
+
+  // status selecionados
+  const allowedStatus = new Set();
+  if (state.statusSel.AGENDADO) allowedStatus.add("AGENDADO");
+  if (state.statusSel.FINALIZADOM) allowedStatus.add("FINALIZADOM");
+  if (state.statusSel.FINALIZADO) allowedStatus.add("FINALIZADO");
+
+  return rows.filter((l) => {
+    // marca
+    if (marcaSel !== "AMBOS") {
+      const m = normalizeMarca(l.MARCA);
+      if (marcaSel === "TECNICO" && m !== "TECNICO") return false;
+      if (marcaSel === "PROFISSIONALIZANTE" && m !== "PROFISSIONALIZANTE") return false;
+    }
+
+    // vendedor
+    if (vendSel !== "TODOS") {
+      if (String(l.VENDEDOR || "").trim() !== vendSel) return false;
+    }
+
+    // janela data
+    const t = toDateMs(l.DATA_CADASTRO);
+    if (t < minDate) return false;
+
+    // status_pendente
+    const st = normalizeStatus(l.STATUS_PENDENTE);
+    if (allowedStatus.size > 0 && !allowedStatus.has(st)) return false;
+
+    // busca cpf/nome
+    if (q) {
+      const hay = normalizeSearch(`${l.CPF || ""} ${l.NOME || ""}`);
+      if (!hay.includes(q)) return false;
+    }
+
+    return true;
+  });
+}
+
+function getJanelaDias(){
+  if (state.janelaDiasPreset === "custom") return clampInt(state.janelaDiasCustom, 1, 3650);
+  return clampInt(state.janelaDiasPreset, 1, 3650);
+}
+
+/** ordena: agrupa por vendedor (fixo), e dentro do grupo aplica sort estável pelas camadas */
+function sortHierarquicoPorVendedor(rows, keys){
+  // agrupa
+  const map = new Map();
+  for (const r of rows) {
+    const v = String(r.VENDEDOR || "").trim() || "(sem vendedor)";
+    if (!map.has(v)) map.set(v, []);
+    map.get(v).push(r);
+  }
+
+  const vendedoresOrdenados = [...map.keys()].sort((a,b)=>a.localeCompare(b,"pt-BR",{sensitivity:"base"}));
+  const out = [];
+
+  for (const v of vendedoresOrdenados){
+    const group = map.get(v);
+
+    // decorate para estabilidade
+    const decorated = group.map((x, i) => ({ x, i }));
+
+    decorated.sort((A,B)=>{
+      const a = A.x; const b = B.x;
+
+      for (const k of keys){
+        let cmp = 0;
+
+        if (k === "DATA_CADASTRO"){
+          cmp = toDateMs(b.DATA_CADASTRO) - toDateMs(a.DATA_CADASTRO); // desc
+        } else if (k === "TOTAL_AGENDAMENTOS"){
+          cmp = toInt(a.TOTAL_AGENDAMENTOS) - toInt(b.TOTAL_AGENDAMENTOS); // asc
+        } else if (k === "MIDIA"){
+          // usa taxa IA (desc), fallback alfabético
+          const ra = state.ratesMidia.get(normKey(a.MIDIA)) ?? -1;
+          const rb = state.ratesMidia.get(normKey(b.MIDIA)) ?? -1;
+          cmp = (rb - ra);
+          if (cmp === 0) cmp = String(a.MIDIA||"").localeCompare(String(b.MIDIA||""),"pt-BR",{sensitivity:"base"});
+        } else if (k === "CURSO"){
+          const ra = state.ratesCurso.get(normKey(a.CURSO)) ?? -1;
+          const rb = state.ratesCurso.get(normKey(b.CURSO)) ?? -1;
+          cmp = (rb - ra);
+          if (cmp === 0) cmp = String(a.CURSO||"").localeCompare(String(b.CURSO||""),"pt-BR",{sensitivity:"base"});
+        } else {
+          cmp = String(a[k]||"").localeCompare(String(b[k]||""),"pt-BR",{sensitivity:"base"});
+        }
+
+        if (cmp !== 0) return cmp;
+      }
+
+      // estabilidade final (mantém ordem original)
+      return A.i - B.i;
+    });
+
+    out.push(...decorated.map(d=>d.x));
+  }
+
+  return out;
+}
+
+/* ------------------------------
+   Ordenação por clique no cabeçalho
+-------------------------------- */
+function bindTableHeaders(){
+  const tbl = $("#tbl");
+  if (!tbl) return;
+  const ths = tbl.querySelectorAll("thead th[data-key]");
+
+  ths.forEach((th)=>{
+    th.addEventListener("click", ()=>{
+      const key = th.getAttribute("data-key") || "";
+      if (!key) return;
+
+      // toggle: none -> asc -> desc -> none
+      if (state.tableSort.key !== key){
+        state.tableSort = { key, dir: "asc" };
+      } else if (state.tableSort.dir === "asc"){
+        state.tableSort = { key, dir: "desc" };
+      } else if (state.tableSort.dir === "desc"){
+        state.tableSort = { key: "", dir: "" };
+      } else {
+        state.tableSort = { key, dir: "asc" };
+      }
+
+      // se já tem lista renderizada, re-gerar
+      gerarLista();
+    });
+  });
+}
+
+function applyTableSortOverride(list){
+  const { key, dir } = state.tableSort;
+  if (!key || !dir) return list;
+
+  const decorated = list.map((x,i)=>({x,i}));
+
+  decorated.sort((A,B)=>{
+    const a = A.x, b = B.x;
+    let cmp = 0;
+
+    if (key === "IDX"){
+      cmp = A.i - B.i;
+    } else if (key === "TOTAL_AGENDAMENTOS"){
+      cmp = toInt(a.TOTAL_AGENDAMENTOS) - toInt(b.TOTAL_AGENDAMENTOS);
+    } else if (key === "DATA_CADASTRO"){
+      cmp = toDateMs(a.DATA_CADASTRO) - toDateMs(b.DATA_CADASTRO);
+    } else if (key === "SCORE_IA"){
+      cmp = (Number(a.SCORE_IA||0) - Number(b.SCORE_IA||0));
+    } else {
+      cmp = String(a[key]||"").localeCompare(String(b[key]||""),"pt-BR",{sensitivity:"base"});
+    }
+
+    if (cmp === 0) return A.i - B.i;
+    return dir === "desc" ? -cmp : cmp;
+  });
+
+  return decorated.map(d=>d.x);
+}
+
+/* ------------------------------
+   Tabela + Export
+-------------------------------- */
+function renderTabela(lista){
+  const tbody = $("#tbody");
+  if (!tbody) return;
+
+  if (!lista.length){
+    tbody.innerHTML = `<tr><td colspan="${ENABLE_IA ? 10 : 9}" style="opacity:.7;font-weight:800;padding:16px;">Nenhum lead para estes filtros.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = lista.map((l, idx)=>{
+    const sc = (ENABLE_IA && l.SCORE_IA != null) ? Number(l.SCORE_IA).toFixed(3) : "";
+    return `
+      <tr>
+        <td>${idx+1}</td>
+        <td>${escapeHtml(l.NOME||"")}</td>
+        <td>${escapeHtml(l.CPF||"")}</td>
+        <td>${escapeHtml(l.CURSO||"")}</td>
+        <td>${escapeHtml(l.MIDIA||"")}</td>
+        <td>${escapeHtml(l.VENDEDOR||"")}</td>
+        <td>${escapeHtml(l.DATA_CADASTRO||"")}</td>
+        <td>${escapeHtml(String(toInt(l.TOTAL_AGENDAMENTOS)))}</td>
+        <td><span class="badge">${escapeHtml(l.STATUS_PENDENTE||"")}</span></td>
+        ${ENABLE_IA ? `<td>${escapeHtml(sc)}</td>` : ``}
+      </tr>
+    `;
+  }).join("");
+}
+
+function exportarCsv(){
+  // exporta a última lista “gerada” (recalcula para consistência)
+  const base = aplicarFiltrosBase(state.all);
+  const sorted = sortHierarquicoPorVendedor(base, state.prioridade);
+  const finalList = applyTableSortOverride(sorted);
+
+  const headers = ["NOME","CPF","CURSO","MIDIA","VENDEDOR","DATA_CADASTRO","TOTAL_AGENDAMENTOS","STATUS_PENDENTE","MARCA","SCORE_IA"];
+  const lines = [headers.join(",")];
+
+  for (const r of finalList){
+    const row = headers.map(h => csvCell(r[h]));
+    lines.push(row.join(","));
+  }
+
+  const blob = new Blob([lines.join("\n")], { type:"text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `hub_qualificacao_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function csvCell(v){
+  const s = String(v ?? "");
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g,'""')}"`;
+  return s;
+}
+
+/* ------------------------------
+   IA (conversão por MIDIA/CURSO)
+-------------------------------- */
+function computeIA(){
+  // IA baseada na janela + marca selecionadas (sem considerar vendedor/busca, para dar recomendação geral do HUB)
+  const janelaDias = getJanelaDias();
+  const minDate = Date.now() - janelaDias * 24*60*60*1000;
+
+  const marcaSel = state.marcaSelecionada;
+
+  const rows = state.all.filter(l=>{
+    // janela
+    if (toDateMs(l.DATA_CADASTRO) < minDate) return false;
+
+    // marca
+    if (marcaSel !== "AMBOS"){
+      const m = normalizeMarca(l.MARCA);
+      if (marcaSel === "TECNICO" && m !== "TECNICO") return false;
+      if (marcaSel === "PROFISSIONALIZANTE" && m !== "PROFISSIONALIZANTE") return false;
+    }
+    return true;
+  });
+
+  // conversão = status FinalizadoM
+  const totalMidia = new Map();
+  const matMidia = new Map();
+  const totalCurso = new Map();
+  const matCurso = new Map();
+
+  for (const l of rows){
+    const mid = normKey(l.MIDIA) || "(vazio)";
+    const cur = normKey(l.CURSO) || "(vazio)";
+
+    totalMidia.set(mid, (totalMidia.get(mid)||0)+1);
+    totalCurso.set(cur, (totalCurso.get(cur)||0)+1);
+
+    if (normalizeStatus(l.STATUS_PENDENTE) === "FINALIZADOM"){
+      matMidia.set(mid, (matMidia.get(mid)||0)+1);
+      matCurso.set(cur, (matCurso.get(cur)||0)+1);
+    }
+  }
+
+  state.ratesMidia = new Map();
+  state.ratesCurso = new Map();
+
+  for (const [k,t] of totalMidia.entries()){
+    const m = matMidia.get(k)||0;
+    state.ratesMidia.set(k, m/Math.max(1,t));
+  }
+  for (const [k,t] of totalCurso.entries()){
+    const m = matCurso.get(k)||0;
+    state.ratesCurso.set(k, m/Math.max(1,t));
+  }
+
+  // atribui SCORE_IA por lead (para tabela) — usa midia/curso
+  for (const l of state.all){
+    const mid = normKey(l.MIDIA) || "(vazio)";
+    const cur = normKey(l.CURSO) || "(vazio)";
+    const rm = state.ratesMidia.get(mid) ?? 0;
+    const rc = state.ratesCurso.get(cur) ?? 0;
+    l.SCORE_IA = rm*0.6 + rc*0.4;
+  }
+}
+
+function buildIASummary(){
+  // ordem sugerida (fixa por enquanto, como você aprovou)
+  const ordem = `DATA_CADASTRO > TOTAL_AGENDAMENTOS > MIDIA > CURSO`;
+
+  const topMidias = topNFromRates(state.ratesMidia, 5);
+  const topCursos = topNFromRates(state.ratesCurso, 5);
+
+  return {
+    ordem,
+    topMidias: topMidias.length ? topMidias.join(" • ") : "Sem dados suficientes na janela selecionada.",
+    topCursos: topCursos.length ? topCursos.join(" • ") : "Sem dados suficientes na janela selecionada.",
+  };
+}
+
+function topNFromRates(map, n){
+  const arr = [...map.entries()]
+    .filter(([k])=>k && k !== "(vazio)")
+    .sort((a,b)=> (b[1]-a[1]) || a[0].localeCompare(b[0],"pt-BR",{sensitivity:"base"}))
+    .slice(0,n)
+    .map(([k,v])=> `${k} (${(v*100).toFixed(1)}%)`);
+  return arr;
+}
+
+/* ------------------------------
+   KPIs
+-------------------------------- */
+function calcKpis(rows){
+  let matriculou = 0;
+  for (const r of rows){
+    if (normalizeStatus(r.STATUS_PENDENTE) === "FINALIZADOM") matriculou++;
+  }
+  return { matriculou };
+}
+
+/* ------------------------------
+   CSV parser + normalização
+-------------------------------- */
+function parseCSV(text) {
+  text = text.replace(/^\uFEFF/, "");
+
+  const rows = [];
+  let cur = [];
+  let field = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const next = text[i + 1];
+
+    if (inQuotes) {
+      if (c === '"' && next === '"') { field += '"'; i++; }
+      else if (c === '"') { inQuotes = false; }
+      else { field += c; }
+      continue;
+    }
+
+    if (c === '"') { inQuotes = true; continue; }
+    if (c === ",") { cur.push(field); field = ""; continue; }
+    if (c === "\n") { cur.push(field); field = ""; rows.push(cur); cur = []; continue; }
+    if (c === "\r") continue;
+
+    field += c;
+  }
+  if (field.length || cur.length) { cur.push(field); rows.push(cur); }
+
+  const clean = rows.filter((r) => r.some((x) => String(x || "").trim().length));
+  if (!clean.length) return [];
+
+  const headers = clean[0].map((h) => String(h || "").trim());
+  return clean.slice(1).map((r) => {
+    const obj = {};
+    headers.forEach((h, idx) => (obj[h] = r[idx] != null ? String(r[idx]) : ""));
+    return obj;
+  });
+}
+
+function normalizeRowKeys(row) {
+  const out = { __raw: row };
+  Object.keys(row).forEach((k) => { out[normalizeKey(k)] = row[k]; });
+  return out;
+}
+
+function normalizeKey(k) {
+  return String(k || "")
+    .trim()
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, "_");
+}
+
+function normalizeLead(r, idx) {
+  const get = (...keys) => {
+    for (const k of keys) {
+      const nk = normalizeKey(k);
+      if (r[nk] != null && String(r[nk]).trim() !== "") return r[nk];
+    }
+    if (r.__raw) {
+      for (const k of keys) {
+        if (r.__raw[k] != null && String(r.__raw[k]).trim() !== "") return r.__raw[k];
+      }
+    }
+    return "";
+  };
+
+  // suporta STATUS_PENDENTE e STATUS_PENDENCIA (se vier antigo)
+  const st = get("STATUS_PENDENTE", "STATUS_PENDENCIA", "STATUS", "STATUS_PENDENCIA");
+
+  const lead = {
+    IDX: idx + 1,
+    MARCA: get("MARCA"),
+    NOME: get("NOME", "NOME_LEAD", "ALUNO", "NOME_COMPLETO"),
+    CPF: get("CPF"),
+    CURSO: get("CURSO", "CURSO_INTERESSE", "CURSO_DE_INTERESSE"),
+    MIDIA: get("MIDIA", "MÍDIA", "ORIGEM", "FONTE", "CANAL"),
+    VENDEDOR: get("VENDEDOR", "CONSULTOR", "RESPONSAVEL"),
+    DATA_CADASTRO: get("DATA_CADASTRO", "DT_CADASTRO"),
+    TOTAL_AGENDAMENTOS: toInt(get("TOTAL_AGENDAMENTOS", "AGENDAMENTOS", "QTD_AGENDAMENTOS", "TOTAL_AGEND")),
+    STATUS_PENDENTE: st,
+    SCORE_IA: null,
+  };
+
+  return lead;
+}
+
+function normalizeStatus(v){
+  const s = String(v||"").trim().toUpperCase();
+  if (!s) return "";
+  if (s.includes("FINALIZADOM") || s.includes("MATRIC")) return "FINALIZADOM";
+  if (s.includes("FINALIZADO")) return "FINALIZADO";
+  if (s.includes("AGEND")) return "AGENDADO";
+  return s;
+}
+
+function normalizeMarca(v){
+  const s = String(v||"").trim().toUpperCase();
+  if (s.includes("PROF")) return "PROFISSIONALIZANTE";
+  if (s.includes("TECN")) return "TECNICO";
+  return s;
+}
+
+function normKey(v){
+  return String(v||"")
+    .trim()
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+/* ------------------------------
+   Render helpers
+-------------------------------- */
+function renderLoading(msg) {
+  const view = $("#view");
+  if (!view) return;
+  view.innerHTML = `<div class="card"><div style="font-weight:1000;font-size:16px;">${escapeHtml(msg||"Carregando…")}</div><div class="smallNote">Aguarde.</div></div>`;
+}
+
+function renderError(err) {
+  const view = $("#view");
+  view.innerHTML = `
+    <div class="card">
+      <h2 style="margin:0 0 8px 0;color:#8b0000;">Erro</h2>
+      <div style="white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px;">${escapeHtml(String(err))}</div>
+      <div class="smallNote" style="margin-top:10px;">
+        Dica: confirme se a planilha está pública e se o <b>gid</b> é da aba correta.
+      </div>
+      <button id="btnTentar" class="btn btnGhost" style="margin-top:12px;">Tentar novamente</button>
+    </div>
+  `;
+  const btn = $("#btnTentar");
+  if (btn) btn.addEventListener("click", async () => { await boot(); renderRoute(); });
+}
+
+function toInt(v) {
+  const n = parseInt(String(v || "").replace(/[^\d-]/g, ""), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function toDateMs(v){
+  const s = String(v||"").trim();
+  if (!s) return new Date("1970-01-01").getTime();
+
+  const iso = Date.parse(s);
+  if (!Number.isNaN(iso)) return iso;
+
+  // dd/mm/yyyy (com ou sem hora)
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m){
+    const dd = parseInt(m[1],10);
+    const mm = parseInt(m[2],10)-1;
+    let yy = parseInt(m[3],10);
+    if (yy < 100) yy += 2000;
+    const hh = parseInt(m[4]||"0",10);
+    const mi = parseInt(m[5]||"0",10);
+    const ss = parseInt(m[6]||"0",10);
+    return new Date(yy,mm,dd,hh,mi,ss).getTime();
+  }
+
+  return new Date("1970-01-01").getTime();
+}
+
+function unique(arr){ return [...new Set(arr)]; }
+
+function formatDateTime(d){
+  try { return d.toLocaleString("pt-BR"); }
+  catch { return String(d); }
+}
+
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function escapeAttr(s) {
+  return escapeHtml(s).replaceAll('"', "&quot;");
+}
+
+function normalizeSearch(s){
+  return String(s||"")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+function clampInt(v, min, max){
+  const n = parseInt(String(v||""),10);
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, n));
+}
+
+function fmtInt(n){
+  try { return Number(n||0).toLocaleString("pt-BR"); }
+  catch { return String(n||0); }
+}
   vendedores: [],
 
   filtroMarca: "TODAS",
