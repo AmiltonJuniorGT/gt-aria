@@ -43,6 +43,12 @@
 </html>    </main>
   </div>
 
+  <!-- IMPORTANTE: defer garante DOM pronto antes do JS -->
+  <script src="./app.js" defer></script>
+</body>
+</html>    </main>
+  </div>
+
   <script>
     // Se o app.js não carregar, mostramos um erro visível
     window.__APPJS_OK__ = false;
