@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>GT • ARIA — HUB Comercial</title>
-  <link rel="stylesheet" href="styles.css?v=20260304-2" />
+  <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
   <div class="app">
@@ -35,6 +35,35 @@
 
       <section class="content" id="view"></section>
     </main>
+  </div>
+
+  <script>
+    // Se o app.js não carregar, mostramos um erro visível
+    window.__APPJS_OK__ = false;
+    window.addEventListener("load", () => {
+      setTimeout(() => {
+        if (!window.__APPJS_OK__) {
+          const v = document.getElementById("view");
+          if (v) {
+            v.innerHTML = `
+              <div class="section">
+                <h2 style="margin:0 0 8px 0;color:#8b0000;">Erro: app.js não carregou</h2>
+                <div style="color:var(--muted);font-weight:700;line-height:1.35;">
+                  Isso quase sempre é <b>caminho errado</b> (404) ou <b>cache</b> no GitHub Pages.<br/>
+                  Verifique se <b>app.js</b> está no mesmo nível do index.html (raiz do site).<br/><br/>
+                  Teste rápido: abra <b>DevTools → Network</b> e veja se <b>app.js</b> voltou 200 ou 404.
+                </div>
+              </div>
+            `;
+          }
+        }
+      }, 800);
+    });
+  </script>
+
+  <script src="./app.js" onerror="window.__APPJS_OK__=false;"></script>
+</body>
+</html>    </main>
   </div>
 
   <script src="app.js?v=20260304-2"></script>
