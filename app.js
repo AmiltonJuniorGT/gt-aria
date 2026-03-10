@@ -1,6 +1,7 @@
 console.log("ARIA HUB carregando...");
 
-// ===== CONFIG =====
+/* CONFIG GOOGLE SHEETS */
+
 const SHEET_ID = "1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI";
 const GID = "1731723852";
 
@@ -8,58 +9,112 @@ const CSV_URL =
 `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID}`;
 
 
-// ===== FETCH CSV =====
-async function carregarDados() {
+/* ELEMENTOS */
 
-  try {
+const crumbs = document.getElementById("crumbs");
+const view = document.getElementById("view");
 
-    const resp = await fetch(CSV_URL);
-    const texto = await resp.text();
 
-    const linhas = texto.split("\n").map(l => l.split(","));
+/* CARREGAR DADOS */
 
-    console.log("Linhas carregadas:", linhas.length);
+async function carregarDados(){
 
-    document.getElementById("crumbs").innerText =
-      "Base carregada: " + (linhas.length - 1) + " leads";
+try{
 
-  } catch (erro) {
+const resp = await fetch(CSV_URL);
+const texto = await resp.text();
 
-    console.error("Erro ao carregar CSV", erro);
+const linhas = texto.split("\n").map(l => l.split(","));
 
-    document.getElementById("crumbs").innerText =
-      "Erro ao carregar base";
+crumbs.innerText =
+"Base carregada: " + (linhas.length-1) + " leads";
 
-  }
+renderTabela(linhas);
+
+}
+
+catch(e){
+
+console.error(e);
+
+crumbs.innerText = "Erro ao carregar base";
+
+}
 
 }
 
 
-// ===== BOTÕES =====
+/* RENDER TABELA */
 
-document.getElementById("btnRecarregarTop").onclick = carregarDados;
+function renderTabela(linhas){
 
-document.getElementById("btnGerarTop").onclick = () => {
-  console.log("Gerar lista clicado");
+if(!linhas || linhas.length < 2){
+view.innerHTML = "Sem dados";
+return;
+}
+
+let html = `
+<div class="tableWrap">
+<table>
+
+<thead>
+<tr>
+`;
+
+linhas[0].forEach(c=>{
+html += `<th>${c}</th>`;
+});
+
+html += `</tr></thead><tbody>`;
+
+for(let i=1;i<linhas.length;i++){
+
+html += "<tr>";
+
+linhas[i].forEach(c=>{
+html += `<td>${c}</td>`;
+});
+
+html += "</tr>";
+
+}
+
+html += `
+</tbody>
+</table>
+</div>
+`;
+
+view.innerHTML = html;
+
+}
+
+
+/* BOTÕES */
+
+document.getElementById("btnRecarregarTop")
+.onclick = carregarDados;
+
+
+document.getElementById("btnGerarTop")
+.onclick = () => {
+
+alert("Gerar lista — etapa seguinte do projeto");
+
 };
 
-document.getElementById("btnExportTop").onclick = () => {
-  window.open(CSV_URL);
+
+document.getElementById("btnExportTop")
+.onclick = () => {
+
+window.open(CSV_URL);
+
 };
 
 
-// ===== START =====
+/* START */
 
-window.onload = () => {
-  carregarDados();
-};  vendedores: [],
-  vendedorSelecionado: "TODOS",
-
-  marcaSelecionada: "AMBOS", // AMBOS | TECNICO | PROFISSIONALIZANTE
-
-  // STATUS_PENDENTE filtro (multi)
-  statusSel: {
-    AGENDADO: true,
+window.onload = carregarDados;    AGENDADO: true,
     FINALIZADOM: false,
     FINALIZADO: false,
   },
