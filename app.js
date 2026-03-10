@@ -1,65 +1,159 @@
 console.log("ARIA HUB carregando...");
 
 /* CONFIG GOOGLE SHEETS */
+const SHEET_ID = "16CDo-QOkvB1rEbsgJcE7Y2Z-oLzzu2m2";
+const GID = "1636709650";
 
-const SHEET_ID = "1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI";
-const GID = "1731723852";
-
-const CSV_URL =
-`https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID}`;
-
+const CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID}`;
 
 /* ELEMENTOS */
-
 const crumbs = document.getElementById("crumbs");
 const view = document.getElementById("view");
+const btnRecarregarTop = document.getElementById("btnRecarregarTop");
+const btnGerarTop = document.getElementById("btnGerarTop");
+const btnExportTop = document.getElementById("btnExportTop");
 
+/* HELPERS */
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function parseCSVLine(line) {
+  const result = [];
+  let current = "";
+  let insideQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    const next = line[i + 1];
+
+    if (char === '"') {
+      if (insideQuotes && next === '"') {
+        current += '"';
+        i++;
+      } else {
+        insideQuotes = !insideQuotes;
+      }
+    } else if (char === "," && !insideQuotes) {
+      result.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+
+  result.push(current);
+  return result.map(cell => cell.trim());
+}
+
+function parseCSV(text) {
+  const lines = text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .filter(line => line.trim() !== "");
+
+  return lines.map(parseCSVLine);
+}
 
 /* CARREGAR DADOS */
+async function carregarDados() {
+  try {
+    crumbs.textContent = "Carregando base...";
+    view.innerHTML = `<div class="tableWrap"><table><tbody><tr><td>Carregando...</td></tr></tbody></table></div>`;
 
-async function carregarDados(){
+    const resp = await fetch(CSV_URL, { cache: "no-store" });
 
-try{
+    if (!resp.ok) {
+      throw new Error(`Erro HTTP ${resp.status}`);
+    }
 
-const resp = await fetch(CSV_URL);
-const texto = await resp.text();
+    const texto = await resp.text();
+    const linhas = parseCSV(texto);
 
-const linhas = texto.split("\n").map(l => l.split(","));
+    if (!linhas.length || linhas.length < 2) {
+      throw new Error("Base vazia ou inválida");
+    }
 
-crumbs.innerText =
-"Base carregada: " + (linhas.length-1) + " leads";
-
-renderTabela(linhas);
-
+    crumbs.textContent = `Base carregada: ${linhas.length - 1} leads`;
+    renderTabela(linhas);
+  } catch (error) {
+    console.error(error);
+    crumbs.textContent = "Erro ao carregar base";
+    view.innerHTML = `
+      <div class="tableWrap">
+        <table>
+          <tbody>
+            <tr>
+              <td>
+                Erro ao carregar a planilha.<br>
+                Verifique se a aba está pública e se o GID está correto.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
 }
-
-catch(e){
-
-console.error(e);
-
-crumbs.innerText = "Erro ao carregar base";
-
-}
-
-}
-
 
 /* RENDER TABELA */
+function renderTabela(linhas) {
+  const headers = linhas[0];
+  const rows = linhas.slice(1);
 
-function renderTabela(linhas){
+  const thead = `
+    <thead>
+      <tr>
+        ${headers.map(col => `<th>${escapeHtml(col)}</th>`).join("")}
+      </tr>
+    </thead>
+  `;
 
-if(!linhas || linhas.length < 2){
-view.innerHTML = "Sem dados";
-return;
+  const tbody = `
+    <tbody>
+      ${rows.map(row => `
+        <tr>
+          ${headers.map((_, idx) => `<td>${escapeHtml(row[idx] ?? "")}</td>`).join("")}
+        </tr>
+      `).join("")}
+    </tbody>
+  `;
+
+  view.innerHTML = `
+    <div class="tableWrap">
+      <table>
+        ${thead}
+        ${tbody}
+      </table>
+    </div>
+  `;
 }
 
-let html = `
-<div class="tableWrap">
-<table>
+/* BOTÕES */
+if (btnRecarregarTop) {
+  btnRecarregarTop.addEventListener("click", carregarDados);
+}
 
-<thead>
-<tr>
-`;
+if (btnGerarTop) {
+  btnGerarTop.addEventListener("click", () => {
+    alert("Gerar lista — próxima etapa da continuidade do projeto.");
+  });
+}
+
+if (btnExportTop) {
+  btnExportTop.addEventListener("click", () => {
+    window.open(CSV_URL, "_blank");
+  });
+}
+
+/* START */
+window.addEventListener("load", carregarDados);`;
 
 linhas[0].forEach(c=>{
 html += `<th>${c}</th>`;
