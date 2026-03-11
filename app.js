@@ -1,24 +1,14 @@
-console.log("ARIA iniciado");
+const CSV_URL = "https://docs.google.com/spreadsheets/d/1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI/export?format=csv&gid=1731723852";
 
-/* PLANILHA */
-const CSV_URL =
-  "https://docs.google.com/spreadsheets/d/1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI/export?format=csv&gid=1731723852";
+const state = {
+  headers: [],
+  rows: [],
+  filtered: [],
+  generated: []
+};
 
-/* ELEMENTOS */
-const crumbs = document.getElementById("crumbs");
-const view = document.getElementById("view");
-const btnRecarregarTop = document.getElementById("btnRecarregarTop");
-const btnGerarTop = document.getElementById("btnGerarTop");
-const btnExportTop = document.getElementById("btnExportTop");
+const $ = (selector) => document.querySelector(selector);
 
-/* ESTADO */
-let BASE_RAW = [];
-let BASE_ROWS = [];
-let FILTRADOS = [];
-let COLS = {};
-let LISTA_GERADA = [];
-
-/* HELPERS */
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -29,12 +19,400 @@ function escapeHtml(value) {
 }
 
 function parseCSVLine(line) {
-  const result = [];
+  const out = [];
   let current = "";
   let inQuotes = false;
 
   for (let i = 0; i < line.length; i++) {
-    const char = line[i];
+    const ch = line[i];
+    const next = line[i + 1];
+
+    if (ch === '"') {
+      if (inQuotes && next === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === "," && !inQuotes) {
+      out.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+
+  out.push(current);
+  return out.map(v => v.trim());
+}
+
+function parseCSV(text) {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .filter(line => line.trim() !== "")
+    .map(parseCSVLine);
+}
+
+function getIndex(name) {
+  return state.headers.findIndex(h => String(h).trim().toUpperCase() === name);
+}
+
+function getCell(row, name) {
+  const idx = getIndex(name);
+  return idx >= 0 ? (row[idx] ?? "") : "";
+}
+
+function toNumber(value) {
+  const cleaned = String(value ?? "").replace(/[^\d,-]/g, "").replace(".", "").replace(",", ".");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function scoreLead(row) {
+  let score = 0;
+
+  const ag = toNumber(getCell(row, "TOTAL_AGENDAMENTOS"));
+  const status = String(getCell(row, "STATUS")).toLowerCase();
+  const pendencia = String(getCell(row, "STATUS_PENDENCIA")).toLowerCase();
+  const matricula = String(getCell(row, "DATA_MATRICULA")).trim();
+  const agendamento = String(getCell(row, "DATA_AGENDAMENTO")).trim();
+  const midia = String(getCell(row, "MIDIA")).toLowerCase();
+
+  score += ag * 15;
+
+  if (agendamento) score += 20;
+  if (matricula) score -= 1000;
+
+  if (status.includes("agend")) score += 25;
+  if (status.includes("confirm")) score += 20;
+  if (status.includes("matric")) score -= 1000;
+  if (status.includes("perd")) score -= 20;
+  if (status.includes("cancel")) score -= 30;
+
+  if (pendencia) score -= 5;
+
+  if (midia.includes("indic")) score += 8;
+  if (midia.includes("whats")) score += 5;
+  if (midia.includes("instagram")) score += 4;
+
+  return score;
+}
+
+function priorityLabel(score) {
+  if (score >= 45) return "Alta";
+  if (score >= 20) return "Média";
+  return "Baixa";
+}
+
+async function loadBase() {
+  const crumbs = $("#crumbs");
+  const view = $("#view");
+
+  crumbs.textContent = "Carregando base...";
+  view.innerHTML = `<div class="card">Carregando...</div>`;
+
+  try {
+    const response = await fetch(CSV_URL, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const text = await response.text();
+    const parsed = parseCSV(text);
+
+    if (!parsed.length || parsed.length < 2) {
+      throw new Error("Base vazia");
+    }
+
+    state.headers = parsed[0];
+    state.rows = parsed.slice(1).map(row => {
+      const score = scoreLead(row);
+      return {
+        row,
+        score,
+        priority: priorityLabel(score)
+      };
+    });
+
+    state.filtered = [...state.rows].sort((a, b) => b.score - a.score);
+
+    renderScreen();
+    crumbs.textContent = `Base carregada: ${state.rows.length} leads`;
+  } catch (error) {
+    console.error(error);
+    crumbs.textContent = "Erro ao carregar base";
+    view.innerHTML = `<div class="card">Erro ao carregar a base.</div>`;
+  }
+}
+
+function uniqueValues(columnName) {
+  const values = state.rows
+    .map(item => String(getCell(item.row, columnName)).trim())
+    .filter(Boolean);
+
+  return [...new Set(values)].sort((a, b) => a.localeCompare(b, "pt-BR"));
+}
+
+function buildOptions(values) {
+  return values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
+}
+
+function renderScreen() {
+  const view = $("#view");
+
+  const vendedores = uniqueValues("VENDEDOR");
+  const midias = uniqueValues("MIDIA");
+  const cursos = uniqueValues("CURSO");
+
+  view.innerHTML = `
+    <div class="card">
+      <div class="filtersGrid">
+        <div class="field">
+          <label class="label">Buscar</label>
+          <input id="fBusca" class="input" placeholder="Nome, curso, telefone, status...">
+        </div>
+
+        <div class="field">
+          <label class="label">Vendedor</label>
+          <select id="fVendedor" class="select">
+            <option value="">Todos</option>
+            ${buildOptions(vendedores)}
+          </select>
+        </div>
+
+        <div class="field">
+          <label class="label">Mídia</label>
+          <select id="fMidia" class="select">
+            <option value="">Todas</option>
+            ${buildOptions(midias)}
+          </select>
+        </div>
+
+        <div class="field">
+          <label class="label">Curso</label>
+          <select id="fCurso" class="select">
+            <option value="">Todos</option>
+            ${buildOptions(cursos)}
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 class="aiTitle">Sugestões da IA</h3>
+      <div class="aiGrid" id="aiGrid"></div>
+      <div class="smallNote">Lista dinâmica baseada em score, agendamentos e status.</div>
+    </div>
+
+    <div class="card">
+      <div class="tableWrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Score</th>
+              <th>Prioridade</th>
+              <th>Nome</th>
+              <th>Curso</th>
+              <th>Mídia</th>
+              <th>Vendedor</th>
+              <th>Status</th>
+              <th>Agendamentos</th>
+              <th>Telefone</th>
+              <th>Data Agendamento</th>
+            </tr>
+          </thead>
+          <tbody id="tbodyLeads"></tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  $("#fBusca").addEventListener("input", applyFilters);
+  $("#fVendedor").addEventListener("change", applyFilters);
+  $("#fMidia").addEventListener("change", applyFilters);
+  $("#fCurso").addEventListener("change", applyFilters);
+
+  applyFilters();
+}
+
+function applyFilters() {
+  const busca = String($("#fBusca")?.value || "").toLowerCase().trim();
+  const vendedor = String($("#fVendedor")?.value || "").toLowerCase().trim();
+  const midia = String($("#fMidia")?.value || "").toLowerCase().trim();
+  const curso = String($("#fCurso")?.value || "").toLowerCase().trim();
+
+  state.filtered = state.rows
+    .filter(item => {
+      const rowText = item.row.join(" ").toLowerCase();
+      const rowVendedor = String(getCell(item.row, "VENDEDOR")).toLowerCase().trim();
+      const rowMidia = String(getCell(item.row, "MIDIA")).toLowerCase().trim();
+      const rowCurso = String(getCell(item.row, "CURSO")).toLowerCase().trim();
+
+      if (busca && !rowText.includes(busca)) return false;
+      if (vendedor && rowVendedor !== vendedor) return false;
+      if (midia && rowMidia !== midia) return false;
+      if (curso && rowCurso !== curso) return false;
+
+      return true;
+    })
+    .sort((a, b) => b.score - a.score);
+
+  $("#crumbs").textContent = `Base carregada: ${state.filtered.length} leads`;
+
+  renderAICards();
+  renderTable();
+}
+
+function renderAICards() {
+  const aiGrid = $("#aiGrid");
+  if (!aiGrid) return;
+
+  const high = state.filtered.filter(item => item.priority === "Alta");
+  const top = state.filtered[0];
+
+  const sellers = {};
+  const courses = {};
+
+  state.filtered.forEach(item => {
+    const vendedor = getCell(item.row, "VENDEDOR") || "Sem vendedor";
+    const curso = getCell(item.row, "CURSO") || "Sem curso";
+
+    sellers[vendedor] = (sellers[vendedor] || 0) + item.score;
+    courses[curso] = (courses[curso] || 0) + item.score;
+  });
+
+  const bestSeller = Object.entries(sellers).sort((a, b) => b[1] - a[1])[0]?.[0] || "—";
+  const bestCourse = Object.entries(courses).sort((a, b) => b[1] - a[1])[0]?.[0] || "—";
+
+  aiGrid.innerHTML = `
+    <div class="aiCard">
+      <div class="aiCardTitle">Leads prioritários</div>
+      <div class="aiCardValue">${high.length}</div>
+      <div class="aiCardText">Quantidade de leads com maior chance de avanço imediato.</div>
+    </div>
+
+    <div class="aiCard">
+      <div class="aiCardTitle">Melhor lead agora</div>
+      <div class="aiCardValue">${escapeHtml(top ? getCell(top.row, "NOME") : "—")}</div>
+      <div class="aiCardText">
+        ${top ? `Curso: ${escapeHtml(getCell(top.row, "CURSO"))} • Vendedor: ${escapeHtml(getCell(top.row, "VENDEDOR"))} • Score: ${top.score}` : "Sem dados"}
+      </div>
+    </div>
+
+    <div class="aiCard">
+      <div class="aiCardTitle">Sugestão IA</div>
+      <div class="aiCardValue">${escapeHtml(bestSeller)}</div>
+      <div class="aiCardText">Priorizar o curso ${escapeHtml(bestCourse)} e começar pelos leads com mais agendamentos.</div>
+    </div>
+  `;
+}
+
+function renderTable() {
+  const tbody = $("#tbodyLeads");
+  if (!tbody) return;
+
+  tbody.innerHTML = state.filtered.map(item => {
+    const row = item.row;
+    const phone =
+      getCell(row, "FONE") ||
+      getCell(row, "FONE2") ||
+      getCell(row, "FONE3");
+
+    return `
+      <tr>
+        <td><strong>${item.score}</strong></td>
+        <td><span class="badge">${escapeHtml(item.priority)}</span></td>
+        <td>${escapeHtml(getCell(row, "NOME"))}</td>
+        <td>${escapeHtml(getCell(row, "CURSO"))}</td>
+        <td>${escapeHtml(getCell(row, "MIDIA"))}</td>
+        <td>${escapeHtml(getCell(row, "VENDEDOR"))}</td>
+        <td>${escapeHtml(getCell(row, "STATUS"))}</td>
+        <td>${escapeHtml(getCell(row, "TOTAL_AGENDAMENTOS"))}</td>
+        <td>${escapeHtml(phone)}</td>
+        <td>${escapeHtml(getCell(row, "DATA_AGENDAMENTO"))}</td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function generateList() {
+  state.generated = state.filtered.slice(0, 30);
+
+  if (!state.generated.length) {
+    alert("Nenhum lead encontrado com os filtros atuais.");
+    return;
+  }
+
+  alert(`Lista gerada com ${state.generated.length} leads prioritários.`);
+}
+
+function exportCSV() {
+  const rows = state.filtered;
+  if (!rows.length) return;
+
+  const headers = [
+    "SCORE",
+    "PRIORIDADE",
+    "NOME",
+    "CURSO",
+    "MIDIA",
+    "VENDEDOR",
+    "STATUS",
+    "TOTAL_AGENDAMENTOS",
+    "FONE",
+    "DATA_AGENDAMENTO"
+  ];
+
+  const csvRows = rows.map(item => {
+    const row = item.row;
+    const phone =
+      getCell(row, "FONE") ||
+      getCell(row, "FONE2") ||
+      getCell(row, "FONE3");
+
+    return [
+      item.score,
+      item.priority,
+      getCell(row, "NOME"),
+      getCell(row, "CURSO"),
+      getCell(row, "MIDIA"),
+      getCell(row, "VENDEDOR"),
+      getCell(row, "STATUS"),
+      getCell(row, "TOTAL_AGENDAMENTOS"),
+      phone,
+      getCell(row, "DATA_AGENDAMENTO")
+    ];
+  });
+
+  const csv = [headers, ...csvRows]
+    .map(row => row.map(cell => `"${String(cell ?? "").replaceAll('"', '""')}"`).join(","))
+    .join("\n");
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "leads-qualificados.csv";
+  a.click();
+
+  URL.revokeObjectURL(url);
+}
+
+function bindTopButtons() {
+  const btnReload = $("#btnRecarregarTop");
+  const btnGenerate = $("#btnGerarTop");
+  const btnExport = $("#btnExportTop");
+
+  if (btnReload) btnReload.onclick = loadBase;
+  if (btnGenerate) btnGenerate.onclick = generateList;
+  if (btnExport) btnExport.onclick = exportCSV;
+}
+
+window.addEventListener("load", () => {
+  bindTopButtons();
+  loadBase();
+});    const char = line[i];
     const next = line[i + 1];
 
     if (char === '"') {
