@@ -1,40 +1,120 @@
 console.log("ARIA HUB carregando...");
 
 /* CONFIG GOOGLE SHEETS */
-const SHEET_ID = "16CDo-QOkvB1rEbsgJcE7Y2Z-oLzzu2m2";
-const GID = "1636709650";
 
-const CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID}`;
+const SHEET_ID = "1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI";
+const GID = "1731723852";
+
+const CSV_URL =
+`https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID}`;
+
 
 /* ELEMENTOS */
+
 const crumbs = document.getElementById("crumbs");
 const view = document.getElementById("view");
-const btnRecarregarTop = document.getElementById("btnRecarregarTop");
-const btnGerarTop = document.getElementById("btnGerarTop");
-const btnExportTop = document.getElementById("btnExportTop");
 
-/* HELPERS */
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+
+/* CARREGAR DADOS */
+
+async function carregarDados(){
+
+try{
+
+const resp = await fetch(CSV_URL);
+const texto = await resp.text();
+
+const linhas = texto.split("\n").map(l => l.split(","));
+
+crumbs.innerText =
+"Base carregada: " + (linhas.length-1) + " leads";
+
+renderTabela(linhas);
+
 }
 
-function parseCSVLine(line) {
-  const result = [];
-  let current = "";
-  let insideQuotes = false;
+catch(e){
 
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    const next = line[i + 1];
+console.error(e);
 
-    if (char === '"') {
-      if (insideQuotes && next === '"') {
-        current += '"';
+crumbs.innerText = "Erro ao carregar base";
+
+}
+
+}
+
+
+/* RENDER TABELA */
+
+function renderTabela(linhas){
+
+if(!linhas || linhas.length < 2){
+view.innerHTML = "Sem dados";
+return;
+}
+
+let html = `
+<div class="tableWrap">
+<table>
+
+<thead>
+<tr>
+`;
+
+linhas[0].forEach(c=>{
+html += `<th>${c}</th>`;
+});
+
+html += `</tr></thead><tbody>`;
+
+for(let i=1;i<linhas.length;i++){
+
+html += "<tr>";
+
+linhas[i].forEach(c=>{
+html += `<td>${c}</td>`;
+});
+
+html += "</tr>";
+
+}
+
+html += `
+</tbody>
+</table>
+</div>
+`;
+
+view.innerHTML = html;
+
+}
+
+
+/* BOTÕES */
+
+document.getElementById("btnRecarregarTop")
+.onclick = carregarDados;
+
+
+document.getElementById("btnGerarTop")
+.onclick = () => {
+
+alert("Gerar lista — etapa seguinte do projeto");
+
+};
+
+
+document.getElementById("btnExportTop")
+.onclick = () => {
+
+window.open(CSV_URL);
+
+};
+
+
+/* START */
+
+window.onload = carregarDados;        current += '"';
         i++;
       } else {
         insideQuotes = !insideQuotes;
