@@ -1,70 +1,41 @@
 <!doctype html>
 <html lang="pt-BR">
-
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-
-<title>GT • ARIA — HUB Comercial</title>
-
-<link rel="stylesheet" href="./styles.css">
-<script src="./app.js" defer></script>
-
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GT • ARIA — Acelerador de Vendas</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
-
 <body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brandMark">grau<span>técnico</span></div>
+        <div class="brandSub">ARIA • Protótipo</div>
+      </div>
 
-<div class="app">
+      <nav class="nav">
+        <a class="navItem" data-route="#/login">Login</a>
+        <a class="navItem active" data-route="#/qualificacao">Tratamento de Leads</a>
+        <a class="navItem" data-route="#/funil">Funil Diário</a>
+      </nav>
+    </aside>
 
-<aside class="sidebar">
+    <main class="main">
+      <header class="topbar">
+        <div id="crumbs">—</div>
 
-<div class="brand">
-<div class="brandMark">grau<span>técnico</span></div>
-<div class="brandSub">ARIA • HUB Comercial</div>
-</div>
+        <div class="topbarActions">
+          <button id="btnRecarregarTop" class="btn btnGhost">Recarregar</button>
+          <button id="btnGerarTop" class="btn btnPrimary">Gerar Lista</button>
+          <button id="btnExportTop" class="btn btnGhost">Exportar CSV</button>
+        </div>
+      </header>
 
-<nav class="nav">
-<a class="navItem active" data-route="#/qualificacao">Tratamento de Leads</a>
-<a class="navItem" data-route="#/funil">Funil Diário</a>
-</nav>
+      <section class="content" id="view"></section>
+    </main>
+  </div>
 
-<div class="sidebarFoot">
-Protótipo • 1 Unidade
-</div>
-
-</aside>
-
-
-<main class="main">
-
-<header class="topbar">
-
-<div id="crumbs">—</div>
-
-<div class="topbarActions">
-
-<button id="btnRecarregarTop" class="btn btnGhost">
-Recarregar
-</button>
-
-<button id="btnGerarTop" class="btn btnPrimary">
-Gerar Lista
-</button>
-
-<button id="btnExportTop" class="btn btnGhost">
-Exportar CSV
-</button>
-
-</div>
-
-</header>
-
-
-<section class="content" id="view"></section>
-
-</main>
-
-</div>
-
+  <script src="app.js"></script>
 </body>
 </html>
