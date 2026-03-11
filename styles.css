@@ -130,6 +130,102 @@ text-align:left;
 tbody td{
 padding:10px;
 border-bottom:1px solid #f1f5f9;
+}.brand{
+background:rgba(255,255,255,.18);
+border-radius:16px;
+padding:16px;
+}
+
+.brandMark{
+font-size:28px;
+font-weight:900;
+}
+
+.brandSub{
+margin-top:6px;
+font-weight:700;
+}
+
+.nav{
+display:flex;
+flex-direction:column;
+gap:12px;
+}
+
+.navItem{
+background:#fff;
+padding:14px;
+border-radius:14px;
+text-decoration:none;
+font-weight:900;
+color:#0b2a0b;
+}
+
+/* MAIN */
+
+.main{
+flex:1;
+display:flex;
+flex-direction:column;
+}
+
+.topbar{
+display:flex;
+justify-content:space-between;
+align-items:center;
+padding:16px 20px;
+background:#fff;
+border-bottom:1px solid var(--line);
+}
+
+.topbarActions{
+display:flex;
+gap:10px;
+}
+
+.btn{
+padding:10px 14px;
+border-radius:12px;
+border:1px solid var(--line);
+background:#fff;
+cursor:pointer;
+font-weight:800;
+}
+
+.btnPrimary{
+background:var(--green);
+color:#fff;
+border:none;
+}
+
+.content{
+padding:20px;
+}
+
+/* TABELA */
+
+.tableWrap{
+border:1px solid var(--line);
+border-radius:12px;
+overflow:auto;
+background:#fff;
+}
+
+table{
+width:100%;
+border-collapse:collapse;
+}
+
+thead th{
+padding:10px;
+border-bottom:1px solid var(--line);
+font-size:13px;
+text-align:left;
+}
+
+tbody td{
+padding:10px;
+border-bottom:1px solid #f1f5f9;
 }}
 
 .navItem{
