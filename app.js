@@ -1,7 +1,6 @@
 console.log("ARIA HUB carregando...");
 
 /* CONFIG GOOGLE SHEETS */
-
 const SHEET_ID = "1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI";
 const GID = "1731723852";
 
@@ -10,16 +9,16 @@ const CSV_URL =
 
 
 /* ELEMENTOS */
-
 const crumbs = document.getElementById("crumbs");
 const view = document.getElementById("view");
 
 
 /* CARREGAR DADOS */
-
 async function carregarDados(){
 
 try{
+
+crumbs.innerText = "Carregando base...";
 
 const resp = await fetch(CSV_URL);
 const texto = await resp.text();
@@ -35,6 +34,85 @@ renderTabela(linhas);
 
 catch(e){
 
+console.error(e);
+
+crumbs.innerText = "Erro ao carregar base";
+
+}
+
+}
+
+
+/* RENDER TABELA */
+function renderTabela(linhas){
+
+if(!linhas || linhas.length < 2){
+view.innerHTML = "Sem dados";
+return;
+}
+
+let html = `
+<div class="tableWrap">
+<table>
+
+<thead>
+<tr>
+`;
+
+linhas[0].forEach(c=>{
+html += `<th>${c}</th>`;
+});
+
+html += `</tr></thead><tbody>`;
+
+for(let i=1;i<linhas.length;i++){
+
+html += "<tr>";
+
+linhas[i].forEach(c=>{
+html += `<td>${c}</td>`;
+});
+
+html += "</tr>";
+
+}
+
+html += `
+</tbody>
+</table>
+</div>
+`;
+
+view.innerHTML = html;
+
+}
+
+
+/* BOTÕES */
+
+document.getElementById("btnRecarregarTop")
+.onclick = carregarDados;
+
+
+document.getElementById("btnExportTop")
+.onclick = () => {
+
+window.open(CSV_URL);
+
+};
+
+
+document.getElementById("btnGerarTop")
+.onclick = () => {
+
+alert("Gerar lista — próxima etapa do projeto");
+
+};
+
+
+/* START */
+
+window.onload = carregarDados;
 console.error(e);
 
 crumbs.innerText = "Erro ao carregar base";
