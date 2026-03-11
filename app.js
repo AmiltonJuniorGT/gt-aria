@@ -1,40 +1,57 @@
-console.log("ARIA HUB carregando...");
+console.log("ARIA iniciado");
 
-/* CONFIG GOOGLE SHEETS */
-const SHEET_ID = "1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI";
-const GID = "1731723852";
-
+/* PLANILHA */
 const CSV_URL =
-`https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${GID}`;
-
+"https://docs.google.com/spreadsheets/d/1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI/export?format=csv&gid=1731723852";
 
 /* ELEMENTOS */
 const crumbs = document.getElementById("crumbs");
 const view = document.getElementById("view");
 
+/* CARREGAR */
+async function carregar() {
 
-/* CARREGAR DADOS */
-async function carregarDados(){
+crumbs.innerText = "Carregando...";
 
-try{
+try {
 
-crumbs.innerText = "Carregando base...";
+const r = await fetch(CSV_URL);
+const t = await r.text();
 
-const resp = await fetch(CSV_URL);
-const texto = await resp.text();
+const linhas = t.split("\n").map(l => l.split(","));
 
-const linhas = texto.split("\n").map(l => l.split(","));
+crumbs.innerText = "Leads: " + (linhas.length - 1);
 
-crumbs.innerText =
-"Base carregada: " + (linhas.length-1) + " leads";
+let html = "<table border='1'><tr>";
 
-renderTabela(linhas);
+linhas[0].forEach(c => html += "<th>"+c+"</th>");
+html += "</tr>";
+
+for(let i=1;i<linhas.length;i++){
+
+html += "<tr>";
+linhas[i].forEach(c => html += "<td>"+c+"</td>");
+html += "</tr>";
+
+}
+
+html += "</table>";
+
+view.innerHTML = html;
 
 }
 
 catch(e){
 
-console.error(e);
+crumbs.innerText = "Erro ao carregar";
+console.log(e);
+
+}
+
+}
+
+/* START */
+window.onload = carregar;console.error(e);
 
 crumbs.innerText = "Erro ao carregar base";
 
