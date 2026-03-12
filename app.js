@@ -1,29 +1,20 @@
-/* =========================================================
-   GT • ARIA — app.js completo
-   - GitHub Pages
-   - JavaScript puro
-   - simples e performático
-   ========================================================= */
-
-const ARIA_CONFIG = {
-  sheetId: "1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI",
-  sheetName: "data",
-  fallbackGid: "1731723852",
-  timeoutMs: 20000,
-  maxRowsRender: 300,
-  defaultRoute: "#/qualificacao"
+const CONFIG = {
+  SHEET_ID: "1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI",
+  SHEET_NAME: "data",
+  GID: "1731723852",
+  TIMEOUT: 20000,
+  MAX_RENDER: 300
 };
 
-const ARIA = {
+const STATE = {
+  route: location.hash || "#/qualificacao",
   rows: [],
-  filteredRows: [],
-  rankedRows: [],
+  filtered: [],
   headers: [],
   loading: false,
   error: "",
   loadedAt: null,
   source: "",
-  route: location.hash || ARIA_CONFIG.defaultRoute,
   filters: {
     vendedor: "",
     midia: "",
@@ -31,10 +22,800 @@ const ARIA = {
     busca: "",
     somenteComAgendamento: false,
     somenteSemMatricula: true
-  },
-  priority: ["VENDEDOR", "MIDIA", "CURSO", "TOTAL_AGENDAMENTOS"],
-  ui: {
-    draggedIndex: null
+  }
+};
+
+document.addEventListener("DOMContentLoaded", initApp);
+
+function initApp() {
+  bindShellEvents();
+  renderRoute();
+  loadData();
+}
+
+function bindShellEvents() {
+  window.addEventListener("hashchange", function () {
+    STATE.route = location.hash || "#/qualificacao";
+    renderRoute();
+  });
+
+  var btnReload = document.getElementById("btnRecarregarTop");
+  var btnGerar = document.getElementById("btnGerarTop");
+  var btnExport = document.getElementById("btnExportTop");
+
+  if (btnReload) btnReload.addEventListener("click", loadData);
+  if (btnGerar) btnGerar.addEventListener("click", function () {
+    applyFilters();
+    renderRoute();
+  });
+  if (btnExport) btnExport.addEventListener("click", exportCSV);
+
+  var navItems = document.querySelectorAll("[data-route]");
+  for (var i = 0; i < navItems.length; i++) {
+    navItems[i].addEventListener("click", function () {
+      var route = this.getAttribute("data-route") || "#/qualificacao";
+      location.hash = route;
+    });
+  }
+}
+
+async function loadData() {
+  STATE.loading = true;
+  STATE.error = "";
+  renderRoute();
+
+  try {
+    var result = await fetchSheetData();
+    STATE.rows = result.rows.map(normalizeRow);
+    STATE.headers = result.headers;
+    STATE.source = result.source;
+    STATE.loadedAt = new Date();
+    applyFilters();
+    exposeStore();
+  } catch (err) {
+    STATE.rows = [];
+    STATE.filtered = [];
+    STATE.headers = [];
+    STATE.source = "";
+    STATE.loadedAt = null;
+    STATE.error = getErrorMessage(err);
+    exposeStore();
+  }
+
+  STATE.loading = false;
+  renderRoute();
+}
+
+async function fetchSheetData() {
+  var attempts = [
+    {
+      source: "gviz-sheet",
+      url:
+        "https://docs.google.com/spreadsheets/d/" +
+        CONFIG.SHEET_ID +
+        "/gviz/tq?tqx=out:json&sheet=" +
+        encodeURIComponent(CONFIG.SHEET_NAME) +
+        "&headers=1&tq=" +
+        encodeURIComponent("select *"),
+      parser: parseGviz
+    },
+    {
+      source: "csv-gid",
+      url:
+        "https://docs.google.com/spreadsheets/d/" +
+        CONFIG.SHEET_ID +
+        "/export?format=csv&gid=" +
+        encodeURIComponent(CONFIG.GID),
+      parser: parseCsvText
+    }
+  ];
+
+  var errors = [];
+
+  for (var i = 0; i < attempts.length; i++) {
+    try {
+      var text = await fetchText(attempts[i].url, CONFIG.TIMEOUT);
+      var parsed = attempts[i].parser(text);
+
+      if (!parsed.rows || !parsed.rows.length) {
+        throw new Error("Sem linhas retornadas.");
+      }
+
+      return {
+        headers: parsed.headers || [],
+        rows: parsed.rows || [],
+        source: attempts[i].source
+      };
+    } catch (e) {
+      errors.push(attempts[i].source + ": " + getErrorMessage(e));
+    }
+  }
+
+  throw new Error("Falha ao carregar planilha. " + errors.join(" | "));
+}
+
+async function fetchText(url, timeout) {
+  var controller = new AbortController();
+  var timer = setTimeout(function () {
+    controller.abort();
+  }, timeout);
+
+  try {
+    var response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error("HTTP " + response.status);
+    }
+
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function parseGviz(text) {
+  var start = text.indexOf("{");
+  var end = text.lastIndexOf("}");
+
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error("Resposta GViz inválida.");
+  }
+
+  var json = JSON.parse(text.slice(start, end + 1));
+  var table = json && json.table ? json.table : {};
+  var cols = Array.isArray(table.cols) ? table.cols : [];
+  var rows = Array.isArray(table.rows) ? table.rows : [];
+
+  var headers = cols.map(function (col, index) {
+    var label = String((col && col.label) || "").trim();
+    return label || ("COL_" + (index + 1));
+  });
+
+  var out = [];
+
+  for (var i = 0; i < rows.length; i++) {
+    var line = rows[i];
+    var cells = Array.isArray(line && line.c) ? line.c : [];
+    var obj = {};
+
+    for (var j = 0; j < headers.length; j++) {
+      obj[headers[j]] = readCell(cells[j]);
+    }
+
+    if (hasAnyValue(obj)) out.push(obj);
+  }
+
+  return { headers: headers, rows: out };
+}
+
+function readCell(cell) {
+  if (!cell) return "";
+  if (cell.f != null && String(cell.f).trim() !== "") return String(cell.f).trim();
+  if (cell.v == null) return "";
+  return String(cell.v).trim();
+}
+
+function parseCsvText(text) {
+  var matrix = parseCSV(text).filter(function (row) {
+    return row.some(function (cell) {
+      return String(cell || "").trim() !== "";
+    });
+  });
+
+  if (!matrix.length) return { headers: [], rows: [] };
+
+  var headers = matrix[0].map(function (header, index) {
+    var value = String(header || "").trim();
+    return value || ("COL_" + (index + 1));
+  });
+
+  var rows = [];
+
+  for (var i = 1; i < matrix.length; i++) {
+    var line = matrix[i];
+    var obj = {};
+
+    for (var j = 0; j < headers.length; j++) {
+      obj[headers[j]] = String(line[j] == null ? "" : line[j]).trim();
+    }
+
+    if (hasAnyValue(obj)) rows.push(obj);
+  }
+
+  return { headers: headers, rows: rows };
+}
+
+function parseCSV(text) {
+  var rows = [];
+  var row = [];
+  var value = "";
+  var inQuotes = false;
+
+  for (var i = 0; i < text.length; i++) {
+    var char = text[i];
+    var next = text[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        value += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      row.push(value);
+      value = "";
+      continue;
+    }
+
+    if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && next === "\n") i++;
+      row.push(value);
+      rows.push(row);
+      row = [];
+      value = "";
+      continue;
+    }
+
+    value += char;
+  }
+
+  row.push(value);
+  rows.push(row);
+
+  return rows;
+}
+
+function normalizeRow(row, index) {
+  var original = {};
+  var normalized = {};
+
+  Object.keys(row).forEach(function (key) {
+    var cleanKey = String(key || "").trim();
+    var cleanValue = String(row[key] == null ? "" : row[key]).trim();
+
+    original[cleanKey] = cleanValue;
+    normalized[normalizeHeader(cleanKey)] = cleanValue;
+  });
+
+  normalized.__index = index;
+  normalized.__original = original;
+  normalized.__search = buildSearchText(normalized);
+  normalized.__score = calculateScore(normalized);
+
+  return normalized;
+}
+
+function normalizeHeader(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+}
+
+function buildSearchText(row) {
+  return Object.keys(row)
+    .map(function (key) {
+      return typeof row[key] === "string" ? row[key] : "";
+    })
+    .join(" ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function calculateScore(row) {
+  var score = 0;
+  var ag = toNumber(getField(row, ["TOTAL_AGENDAMENTOS"]));
+  var status = (
+    getField(row, ["STATUS"]) +
+    " " +
+    getField(row, ["STATUS_PENDENCIA"])
+  ).toLowerCase();
+
+  if (getField(row, ["VENDEDOR"])) score += 10;
+  if (getField(row, ["MIDIA", "MIDIA_"])) score += 10;
+  if (getField(row, ["CURSO"])) score += 10;
+  if (getLeadName(row)) score += 10;
+  if (getLeadPhone(row)) score += 10;
+
+  if (ag > 0) score += Math.min(ag * 8, 30);
+  if (status.indexOf("agend") >= 0) score += 10;
+  if (status.indexOf("contat") >= 0) score += 8;
+  if (status.indexOf("matric") >= 0) score -= 50;
+
+  if (score < 0) score = 0;
+  if (score > 100) score = 100;
+
+  return Math.round(score);
+}
+
+function applyFilters() {
+  var busca = normalizeText(STATE.filters.busca);
+
+  STATE.filtered = STATE.rows.filter(function (row) {
+    if (STATE.filters.vendedor && getField(row, ["VENDEDOR"]) !== STATE.filters.vendedor) return false;
+    if (STATE.filters.midia && getField(row, ["MIDIA", "MIDIA_"]) !== STATE.filters.midia) return false;
+    if (STATE.filters.curso && getField(row, ["CURSO"]) !== STATE.filters.curso) return false;
+
+    if (STATE.filters.somenteComAgendamento) {
+      if (toNumber(getField(row, ["TOTAL_AGENDAMENTOS"])) <= 0) return false;
+    }
+
+    if (STATE.filters.somenteSemMatricula) {
+      var s = (
+        getField(row, ["STATUS"]) +
+        " " +
+        getField(row, ["STATUS_PENDENCIA"]) +
+        " " +
+        getField(row, ["DATA_MATRICULA"])
+      ).toLowerCase();
+
+      if (s.indexOf("matric") >= 0) return false;
+    }
+
+    if (busca && row.__search.indexOf(busca) === -1) return false;
+
+    return true;
+  });
+
+  STATE.filtered.sort(function (a, b) {
+    return b.__score - a.__score;
+  });
+}
+
+function renderRoute() {
+  updateCrumbs();
+
+  var view = document.getElementById("view");
+  if (!view) return;
+
+  if (STATE.route === "#/login") {
+    view.innerHTML = '<section class="section"><h1 class="hTitle">Login</h1><div class="smallNote">Tela reservada.</div></section>';
+    return;
+  }
+
+  if (STATE.route === "#/funil") {
+    view.innerHTML = '<section class="section"><h1 class="hTitle">Funil Diário</h1><div class="smallNote">Módulo reservado.</div></section>';
+    return;
+  }
+
+  view.innerHTML = renderQualificacao();
+  bindQualificacaoEvents();
+}
+
+function updateCrumbs() {
+  var crumbs = document.getElementById("crumbs");
+  if (!crumbs) return;
+
+  if (STATE.route === "#/login") crumbs.textContent = "Login";
+  else if (STATE.route === "#/funil") crumbs.textContent = "Funil Diário";
+  else crumbs.textContent = "Tratamento de Leads";
+}
+
+function renderQualificacao() {
+  var meta = getMetaText();
+  var opts = getOptions();
+  var kpis = getKpis();
+  var rows = STATE.filtered.slice(0, CONFIG.MAX_RENDER);
+
+  return `
+    <section class="section">
+      <h1 class="hTitle">Tratamento de Leads</h1>
+      <div class="smallNote">${escapeHtml(meta)}</div>
+    </section>
+
+    <section class="section">
+      <div class="kpiGrid">
+        <div class="kpiCard">
+          <div class="kpiTitle">Base total</div>
+          <div class="kpiValue">${formatNumber(kpis.total)}</div>
+        </div>
+        <div class="kpiCard">
+          <div class="kpiTitle">Filtrados</div>
+          <div class="kpiValue">${formatNumber(kpis.filtered)}</div>
+        </div>
+        <div class="kpiCard">
+          <div class="kpiTitle">Alta prioridade</div>
+          <div class="kpiValue">${formatNumber(kpis.high)}</div>
+        </div>
+        <div class="kpiCard">
+          <div class="kpiTitle">Agendados</div>
+          <div class="kpiValue">${formatNumber(kpis.scheduled)}</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="aiTitle">Filtros</div>
+
+      <div class="filtersGrid">
+        <div class="field">
+          <label class="label" for="fVendedor">Vendedor</label>
+          <select id="fVendedor" class="select">
+            <option value="">Todos</option>
+            ${opts.vendedores.map(function (v) {
+              return '<option value="' + escapeHtml(v) + '"' + (STATE.filters.vendedor === v ? " selected" : "") + '>' + escapeHtml(v) + '</option>';
+            }).join("")}
+          </select>
+        </div>
+
+        <div class="field">
+          <label class="label" for="fMidia">Mídia</label>
+          <select id="fMidia" class="select">
+            <option value="">Todas</option>
+            ${opts.midias.map(function (v) {
+              return '<option value="' + escapeHtml(v) + '"' + (STATE.filters.midia === v ? " selected" : "") + '>' + escapeHtml(v) + '</option>';
+            }).join("")}
+          </select>
+        </div>
+
+        <div class="field">
+          <label class="label" for="fCurso">Curso</label>
+          <select id="fCurso" class="select">
+            <option value="">Todos</option>
+            ${opts.cursos.map(function (v) {
+              return '<option value="' + escapeHtml(v) + '"' + (STATE.filters.curso === v ? " selected" : "") + '>' + escapeHtml(v) + '</option>';
+            }).join("")}
+          </select>
+        </div>
+
+        <div class="field">
+          <label class="label" for="fBusca">Busca</label>
+          <input id="fBusca" class="input" type="text" placeholder="Nome, telefone, status..." value="${escapeHtml(STATE.filters.busca)}">
+        </div>
+      </div>
+
+      <div class="inlineChecks">
+        <label class="chk">
+          <input id="fAgendamento" type="checkbox" ${STATE.filters.somenteComAgendamento ? "checked" : ""}>
+          <span>Somente com agendamento</span>
+        </label>
+
+        <label class="chk">
+          <input id="fSemMatricula" type="checkbox" ${STATE.filters.somenteSemMatricula ? "checked" : ""}>
+          <span>Somente sem matrícula</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="aiTitle">Sugestões da IA</div>
+      <div class="aiGrid">
+        <div class="aiCard">
+          <div class="aiCardTitle">Melhor foco</div>
+          <div class="aiCardValue">${escapeHtml(getTopMidia())}</div>
+          <div class="aiCardText">Mídia com maior presença no recorte atual.</div>
+        </div>
+        <div class="aiCard">
+          <div class="aiCardTitle">Curso destaque</div>
+          <div class="aiCardValue">${escapeHtml(getTopCurso())}</div>
+          <div class="aiCardText">Curso mais recorrente entre os leads filtrados.</div>
+        </div>
+        <div class="aiCard">
+          <div class="aiCardTitle">Ação sugerida</div>
+          <div class="aiCardValue">${kpis.high > 0 ? formatNumber(kpis.high) + " quentes" : "Base morna"}</div>
+          <div class="aiCardText">${kpis.high > 0 ? "Priorizar contato imediato." : "Refinar filtros e revisar priorização."}</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="aiTitle">Leads priorizados</div>
+      <div class="tableWrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Prioridade</th>
+              <th>Score</th>
+              <th>Nome</th>
+              <th>Curso</th>
+              <th>Mídia</th>
+              <th>Vendedor</th>
+              <th>Agendamentos</th>
+              <th>Status</th>
+              <th>Data Cadastro</th>
+              <th>Telefone</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              rows.length
+                ? rows.map(function (row, index) {
+                    return `
+                      <tr>
+                        <td><span class="badge">${index + 1}</span></td>
+                        <td>${row.__score}</td>
+                        <td>${escapeHtml(getLeadName(row))}</td>
+                        <td>${escapeHtml(getField(row, ["CURSO"]))}</td>
+                        <td>${escapeHtml(getField(row, ["MIDIA", "MIDIA_"]))}</td>
+                        <td>${escapeHtml(getField(row, ["VENDEDOR"]))}</td>
+                        <td>${escapeHtml(getField(row, ["TOTAL_AGENDAMENTOS"]))}</td>
+                        <td>${escapeHtml(getField(row, ["STATUS", "STATUS_PENDENCIA"]))}</td>
+                        <td>${escapeHtml(getField(row, ["DATA_CADASTRO"]))}</td>
+                        <td>${escapeHtml(getLeadPhone(row))}</td>
+                      </tr>
+                    `;
+                  }).join("")
+                : '<tr><td colspan="10">Nenhum lead encontrado.</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function bindQualificacaoEvents() {
+  var fVendedor = document.getElementById("fVendedor");
+  var fMidia = document.getElementById("fMidia");
+  var fCurso = document.getElementById("fCurso");
+  var fBusca = document.getElementById("fBusca");
+  var fAgendamento = document.getElementById("fAgendamento");
+  var fSemMatricula = document.getElementById("fSemMatricula");
+
+  if (fVendedor) {
+    fVendedor.addEventListener("change", function () {
+      STATE.filters.vendedor = this.value;
+      applyFilters();
+      renderRoute();
+    });
+  }
+
+  if (fMidia) {
+    fMidia.addEventListener("change", function () {
+      STATE.filters.midia = this.value;
+      applyFilters();
+      renderRoute();
+    });
+  }
+
+  if (fCurso) {
+    fCurso.addEventListener("change", function () {
+      STATE.filters.curso = this.value;
+      applyFilters();
+      renderRoute();
+    });
+  }
+
+  if (fBusca) {
+    fBusca.addEventListener("input", debounce(function () {
+      STATE.filters.busca = fBusca.value || "";
+      applyFilters();
+      renderRoute();
+    }, 180));
+  }
+
+  if (fAgendamento) {
+    fAgendamento.addEventListener("change", function () {
+      STATE.filters.somenteComAgendamento = this.checked;
+      applyFilters();
+      renderRoute();
+    });
+  }
+
+  if (fSemMatricula) {
+    fSemMatricula.addEventListener("change", function () {
+      STATE.filters.somenteSemMatricula = this.checked;
+      applyFilters();
+      renderRoute();
+    });
+  }
+}
+
+function getOptions() {
+  return {
+    vendedores: uniqueSorted(STATE.rows.map(function (r) { return getField(r, ["VENDEDOR"]); })),
+    midias: uniqueSorted(STATE.rows.map(function (r) { return getField(r, ["MIDIA", "MIDIA_"]); })),
+    cursos: uniqueSorted(STATE.rows.map(function (r) { return getField(r, ["CURSO"]); }))
+  };
+}
+
+function getKpis() {
+  return {
+    total: STATE.rows.length,
+    filtered: STATE.filtered.length,
+    high: STATE.filtered.filter(function (r) { return r.__score >= 70; }).length,
+    scheduled: STATE.filtered.filter(function (r) { return toNumber(getField(r, ["TOTAL_AGENDAMENTOS"])) > 0; }).length
+  };
+}
+
+function getMetaText() {
+  if (STATE.loading) return "Carregando base...";
+  if (STATE.error) return "Erro: " + STATE.error;
+  if (!STATE.loadedAt) return "Base não carregada.";
+  return "Base: " + formatNumber(STATE.rows.length) + " leads • filtrados: " + formatNumber(STATE.filtered.length) + " • origem: " + STATE.source + " • atualizado: " + formatDateTime(STATE.loadedAt);
+}
+
+function getTopMidia() {
+  return getTopValue(STATE.filtered, ["MIDIA", "MIDIA_"]) || "Sem destaque";
+}
+
+function getTopCurso() {
+  return getTopValue(STATE.filtered, ["CURSO"]) || "Sem destaque";
+}
+
+function getTopValue(rows, keys) {
+  var map = {};
+
+  rows.slice(0, 500).forEach(function (row) {
+    var key = getField(row, keys) || "Sem valor";
+    map[key] = (map[key] || 0) + 1;
+  });
+
+  var best = "";
+  var bestCount = 0;
+
+  Object.keys(map).forEach(function (key) {
+    if (map[key] > bestCount) {
+      best = key;
+      bestCount = map[key];
+    }
+  });
+
+  return best;
+}
+
+function exportCSV() {
+  if (!STATE.filtered.length) return;
+
+  var headers = [
+    "PRIORIDADE",
+    "SCORE",
+    "NOME",
+    "CURSO",
+    "MIDIA",
+    "VENDEDOR",
+    "TOTAL_AGENDAMENTOS",
+    "STATUS",
+    "DATA_CADASTRO",
+    "FONE"
+  ];
+
+  var lines = STATE.filtered.map(function (row, index) {
+    return [
+      index + 1,
+      row.__score,
+      getLeadName(row),
+      getField(row, ["CURSO"]),
+      getField(row, ["MIDIA", "MIDIA_"]),
+      getField(row, ["VENDEDOR"]),
+      getField(row, ["TOTAL_AGENDAMENTOS"]),
+      getField(row, ["STATUS", "STATUS_PENDENCIA"]),
+      getField(row, ["DATA_CADASTRO"]),
+      getLeadPhone(row)
+    ];
+  });
+
+  var csv = [headers].concat(lines).map(function (line) {
+    return line.map(csvEscape).join(",");
+  }).join("\n");
+
+  var blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "leads_priorizados.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exposeStore() {
+  window.ARIA_STORE = {
+    getRows: function () { return STATE.rows.slice(); },
+    getFiltered: function () { return STATE.filtered.slice(); },
+    getMeta: function () {
+      return {
+        total: STATE.rows.length,
+        filtered: STATE.filtered.length,
+        loading: STATE.loading,
+        error: STATE.error,
+        source: STATE.source,
+        loadedAt: STATE.loadedAt
+      };
+    },
+    reload: loadData
+  };
+}
+
+function getField(row, keys) {
+  for (var i = 0; i < keys.length; i++) {
+    var key = normalizeHeader(keys[i]);
+    if (row[key] != null && String(row[key]).trim() !== "") {
+      return String(row[key]).trim();
+    }
+  }
+  return "";
+}
+
+function getLeadName(row) {
+  return getField(row, ["NOME", "LEAD", "CLIENTE", "ALUNO"]);
+}
+
+function getLeadPhone(row) {
+  return getField(row, ["FONE", "FONE1", "FONE2", "FONE3", "CELULAR", "TELEFONE"]);
+}
+
+function uniqueSorted(values) {
+  return Array.from(new Set(values.filter(Boolean))).sort(function (a, b) {
+    return a.localeCompare(b, "pt-BR");
+  });
+}
+
+function hasAnyValue(obj) {
+  return Object.keys(obj).some(function (key) {
+    return String(obj[key] == null ? "" : obj[key]).trim() !== "";
+  });
+}
+
+function normalizeText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function toNumber(value) {
+  var clean = String(value || "")
+    .replace(/\./g, "")
+    .replace(",", ".")
+    .replace(/[^\d.-]/g, "");
+  var n = Number(clean);
+  return isNaN(n) ? 0 : n;
+}
+
+function formatNumber(value) {
+  return new Intl.NumberFormat("pt-BR").format(Number(value || 0));
+}
+
+function formatDateTime(date) {
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short"
+  }).format(date);
+}
+
+function csvEscape(value) {
+  return '"' + String(value == null ? "" : value).replace(/"/g, '""') + '"';
+}
+
+function getErrorMessage(err) {
+  if (!err) return "Erro desconhecido.";
+  if (err.name === "AbortError") return "Tempo limite excedido.";
+  return String(err.message || err);
+}
+
+function escapeHtml(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function debounce(fn, wait) {
+  var timer = null;
+  return function () {
+    var args = arguments;
+    clearTimeout(timer);
+    timer = setTimeout(function () {
+      fn.apply(null, args);
+    }, wait);
+  };
+}    draggedIndex: null
   }
 };
 
