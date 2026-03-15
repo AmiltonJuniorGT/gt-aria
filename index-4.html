@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GT • ARIA — Acelerador de Vendas</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brandMark">grau<span>técnico</span></div>
+        <div class="brandSub">ARIA • Protótipo</div>
+      </div>
+
+      <nav class="nav">
+        <a class="navItem" data-route="#/login">Login</a>
+        <a class="navItem active" data-route="#/qualificacao">Tratamento de Leads</a>
+        <a class="navItem" data-route="#/funil">Funil Diário</a>
+      </nav>
+
+      <div class="sidebarFoot">
+        LEADS GT aria
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div id="crumbs">—</div>
+
+        <div class="topbarActions">
+          <button id="btnRecarregarTop" class="btn btnGhost" type="button">Recarregar</button>
+          <button id="btnGerarTop" class="btn btnPrimary" type="button">Gerar Lista</button>
+          <button id="btnExportTop" class="btn btnGhost" type="button">Exportar CSV</button>
+        </div>
+      </header>
+
+      <section class="content" id="view"></section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
