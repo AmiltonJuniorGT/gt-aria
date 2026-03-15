@@ -39,7 +39,7 @@ const AGEND_BUCKETS = [
   { key: "TODOS", label: "Todos" },
   { key: "0_1", label: "0–1" },
   { key: "2_3", label: "2–3" },
-  { key: "4P", label: "4+" },
+  { key: "4P", label: "+4" },
 ];
 
 const WINDOW_OPTIONS = [
