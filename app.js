@@ -299,16 +299,9 @@ function renderQualificacao() {
     <div class="hSep"></div>
 
     <div class="card">
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;">
-        <div style="border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:14px;">
-          <div style="font-size:12px;opacity:.7;margin-bottom:6px;">IA • Base Total</div>
-          <div style="font-size:14px;font-weight:800;line-height:1.5;">${escapeHtml(aiBase)}</div>
-        </div>
-
-        <div style="border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:14px;">
-          <div style="font-size:12px;opacity:.7;margin-bottom:6px;">IA • Vendedor</div>
-          <div style="font-size:14px;font-weight:800;line-height:1.5;">${escapeHtml(aiVendedor)}</div>
-        </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;">
+        ${renderAICard("IA • Base Total", "Visão consolidada da base filtrada", aiBase)}
+        ${renderAICard("IA • Vendedor", state.vendedorSelecionado === "TODOS" ? "Selecione um vendedor para detalhar" : `Carteira de ${escapeHtml(state.vendedorSelecionado)}`, aiVendedor)}
       </div>
     </div>
 
@@ -321,7 +314,7 @@ function renderQualificacao() {
       </div>
       <div id="drag" style="max-width:520px;"></div>
       <div class="muted small" style="margin-top:8px;">
-        DATA_CADASTRO por dia • TOTAL_AGENDAMENTOS menor primeiro • MIDIA/CURSO por taxa de conversão.
+        DATA_CADASTRO por dia • TOTAL_AGENDAMENTOS menor primeiro • MIDIA/CURSO por taxa de conversão de Agendado → FinalizadoM.
       </div>
     </div>
 
@@ -349,11 +342,12 @@ function renderQualificacao() {
               ${renderSortableTh("Agend.", "TOTAL_AGENDAMENTOS")}
               ${renderSortableTh("Status", "STATUS_PENDENTE")}
               ${ENABLE_SCORE_IA ? renderSortableTh("Score IA", "SCORE_IA") : ""}
-              <th>Contato</th>
+              <th>Telefone</th>
+              <th>WhatsApp</th>
             </tr>
           </thead>
           <tbody id="tbody">
-            <tr><td colspan="${ENABLE_SCORE_IA ? 13 : 12}" class="muted">Clique em <b>Gerar Lista</b>.</td></tr>
+            <tr><td colspan="${ENABLE_SCORE_IA ? 14 : 13}" class="muted">Clique em <b>Gerar Lista</b>.</td></tr>
           </tbody>
         </table>
       </div>
@@ -374,6 +368,41 @@ function renderSortableTh(label, key) {
         <span class="sortIcon">${icon}</span>
       </button>
     </th>
+  `;
+}
+
+function renderAICard(title, subtitle, items) {
+  const listHtml = (items || [])
+    .map((item, index) => {
+      return `
+        <li style="display:grid;grid-template-columns:28px 1fr;gap:10px;align-items:flex-start;">
+          <div style="width:28px;height:28px;border-radius:999px;background:#d1fae5;color:#065f46;font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center;">
+            ${index + 1}
+          </div>
+          <div style="color:#14532d;font-size:14px;line-height:1.45;font-weight:700;">${escapeHtml(item)}</div>
+        </li>
+      `;
+    })
+    .join("");
+
+  return `
+    <div style="
+      border:1px solid #bbf7d0;
+      border-radius:16px;
+      padding:16px;
+      background:linear-gradient(180deg,#f0fdf4 0%,#dcfce7 100%);
+      box-shadow:0 8px 20px rgba(22,101,52,.08);
+    ">
+      <div style="font-size:12px;letter-spacing:.02em;color:#166534;opacity:.9;font-weight:800;margin-bottom:4px;">
+        ${escapeHtml(title)}
+      </div>
+      <div style="font-size:13px;color:#15803d;font-weight:700;margin-bottom:12px;">
+        ${escapeHtml(subtitle)}
+      </div>
+      <ol style="list-style:none;padding:0;margin:0;display:grid;gap:10px;">
+        ${listHtml || `<li style="color:#166534;font-weight:700;">Sem dados suficientes.</li>`}
+      </ol>
+    </div>
   `;
 }
 
@@ -455,32 +484,47 @@ function bindUI() {
    IA
 -------------------------------- */
 function buildBaseInsight(base) {
-  if (!base.length) return "Sem dados na base filtrada.";
+  if (!base.length) return ["Sem dados na base filtrada."];
 
-  const topMidia = getTopRateLabel(state.convMidia);
-  const topCurso = getTopRateLabel(state.convCurso);
-  const conv = base.filter(isMatriculado).length / Math.max(1, base.length);
+  const topMidias = getTopRateLabels(state.convMidia, 2);
+  const topCursos = getTopRateLabels(state.convCurso, 2);
+  const conv = getAgendadoToFinalizadoRate(base);
 
-  return `Conversão ${formatPct(conv)}. Melhor mídia: ${topMidia}. Melhor curso: ${topCurso}. Ordem sugerida: ${state.prioridade.join(" > ")}.`;
+  return [
+    `Conversão Agendado → FinalizadoM da base: ${formatPct(conv)}.`,
+    `Prioridade sugerida de mídia: ${topMidias.join(" • ") || "—"}.`,
+    `Prioridade sugerida de curso: ${topCursos.join(" • ") || "—"}.`,
+  ];
 }
 
 function buildSellerInsight(base, vendedor) {
   if (vendedor === "TODOS") {
-    return "Selecione um vendedor para ver a leitura individual da carteira.";
+    return [
+      "Selecione um vendedor para detalhar a carteira.",
+      "A IA mostrará a prioridade sugerida com base em conversão.",
+      "A leitura considera Agendado que virou FinalizadoM.",
+    ];
   }
 
   const sellerBase = base.filter((l) => (l.VENDEDOR || "").trim() === vendedor);
+
   if (!sellerBase.length) {
-    return `Sem dados para ${vendedor} dentro dos filtros atuais.`;
+    return [
+      `Sem dados para ${vendedor} nos filtros atuais.`,
+      "Tente ampliar a janela ou remover filtros.",
+      "Sem carteira suficiente para sugerir prioridade.",
+    ];
   }
 
   const sellerRatesMidia = buildRateMapForField(sellerBase, "MIDIA");
   const sellerRatesCurso = buildRateMapForField(sellerBase, "CURSO");
-  const topMidia = getTopRateLabel(sellerRatesMidia);
-  const topCurso = getTopRateLabel(sellerRatesCurso);
-  const conv = sellerBase.filter(isMatriculado).length / Math.max(1, sellerBase.length);
+  const conv = getAgendadoToFinalizadoRate(sellerBase);
 
-  return `${vendedor}: conversão ${formatPct(conv)}. Melhor mídia: ${topMidia}. Melhor curso: ${topCurso}. Priorize recência + baixo nº de agendamentos.`;
+  return [
+    `${vendedor}: conversão Agendado → FinalizadoM em ${formatPct(conv)}.`,
+    `Mídias prioritárias: ${getTopRateLabels(sellerRatesMidia, 2).join(" • ") || "—"}.`,
+    `Cursos prioritários: ${getTopRateLabels(sellerRatesCurso, 2).join(" • ") || "—"}.`,
+  ];
 }
 
 function buildRateMapForField(list, field) {
@@ -488,9 +532,14 @@ function buildRateMapForField(list, field) {
   const conv = new Map();
 
   for (const item of list) {
+    if (!isAgendadoOuFinalizado(item)) continue;
+
     const key = normalizeText(item[field] || "(vazio)");
     total.set(key, (total.get(key) || 0) + 1);
-    if (isMatriculado(item)) conv.set(key, (conv.get(key) || 0) + 1);
+
+    if (isMatriculado(item)) {
+      conv.set(key, (conv.get(key) || 0) + 1);
+    }
   }
 
   const out = new Map();
@@ -500,11 +549,18 @@ function buildRateMapForField(list, field) {
   return out;
 }
 
-function getTopRateLabel(map) {
-  const arr = [...map.entries()].sort((a, b) => b[1] - a[1]);
-  if (!arr.length) return "—";
-  const [k, v] = arr[0];
-  return `${k} (${formatPct(v)})`;
+function getTopRateLabels(map, limit = 2) {
+  return [...map.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([k, v]) => `${k} (${formatPct(v)})`);
+}
+
+function getAgendadoToFinalizadoRate(list) {
+  const relevantes = list.filter(isAgendadoOuFinalizado);
+  if (!relevantes.length) return 0;
+  const finalizados = relevantes.filter(isMatriculado).length;
+  return finalizados / relevantes.length;
 }
 
 /* ------------------------------
@@ -660,7 +716,7 @@ function renderTabelaGrouped(vendedores, groups) {
   if (!tbody) return;
 
   if (!state.currentList.length) {
-    tbody.innerHTML = `<tr><td colspan="${ENABLE_SCORE_IA ? 13 : 12}" class="muted">Nenhum lead para este filtro.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${ENABLE_SCORE_IA ? 14 : 13}" class="muted">Nenhum lead para este filtro.</td></tr>`;
     return;
   }
 
@@ -673,7 +729,7 @@ function renderTabelaGrouped(vendedores, groups) {
 
     html.push(`
       <tr>
-        <td colspan="${ENABLE_SCORE_IA ? 13 : 12}" style="background:#f8fafc;border-bottom:1px solid #e5e7eb;">
+        <td colspan="${ENABLE_SCORE_IA ? 14 : 13}" style="background:#f8fafc;border-bottom:1px solid #e5e7eb;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
             <div style="font-weight:1000;">${escapeHtml(vend)}</div>
             <div style="opacity:.8;font-size:12px;">${list.length} leads</div>
@@ -684,6 +740,7 @@ function renderTabelaGrouped(vendedores, groups) {
 
     for (const l of list) {
       rowIndex += 1;
+      const phoneDisplay = formatPhoneDisplay(getBestPhone(l));
       const wa = buildWhatsLink(l);
       const status = normalizeStatusLabel(l.STATUS_PENDENTE);
       const marcaLabel = normalizeMarcaLabel(l.MARCA);
@@ -703,7 +760,8 @@ function renderTabelaGrouped(vendedores, groups) {
           <td>${escapeHtml(String(toInt(l.TOTAL_AGENDAMENTOS)))}</td>
           <td>${escapeHtml(status)}</td>
           ${ENABLE_SCORE_IA ? `<td>${l.SCORE_IA != null ? Number(l.SCORE_IA).toFixed(3) : ""}</td>` : ""}
-          <td>${wa ? `<a href="${wa}" target="_blank" rel="noopener">Whats</a>` : "-"}</td>
+          <td>${escapeHtml(phoneDisplay || "-")}</td>
+          <td>${wa ? `<a href="${wa}" target="_blank" rel="noopener">🟢 WhatsApp</a>` : "-"}</td>
         </tr>
       `);
     }
@@ -753,7 +811,8 @@ function filtrarLista(base) {
     lista = lista.filter((l) => {
       const cpf = String(l.CPF || "").replace(/\D/g, "");
       const nome = String(l.NOME || "").toLowerCase();
-      if (qDigits && cpf.includes(qDigits)) return true;
+      const phone = String(getBestPhone(l) || "");
+      if (qDigits && (cpf.includes(qDigits) || phone.includes(qDigits))) return true;
       if (nome.includes(qLower)) return true;
       return false;
     });
@@ -799,6 +858,8 @@ function computeConversionRates(allLeadsSlice) {
   const matC = new Map();
 
   for (const l of allLeadsSlice) {
+    if (!isAgendadoOuFinalizado(l)) continue;
+
     const m = normalizeText(l.MIDIA || "(vazio)");
     const c = normalizeText(l.CURSO || "(vazio)");
 
@@ -885,6 +946,8 @@ function exportarListaCSV() {
     "TOTAL_AGENDAMENTOS",
     "STATUS_PENDENTE",
     "SCORE_IA",
+    "TELEFONE",
+    "WHATSAPP",
   ];
 
   const rows = [headers.join(",")];
@@ -910,6 +973,8 @@ function exportarListaCSV() {
         csvCell(String(toInt(l.TOTAL_AGENDAMENTOS))),
         csvCell(normalizeStatusLabel(l.STATUS_PENDENTE)),
         csvCell(l.SCORE_IA != null ? String(Number(l.SCORE_IA).toFixed(3)) : ""),
+        csvCell(formatPhoneDisplay(getBestPhone(l))),
+        csvCell(buildWhatsLink(l)),
       ].join(","));
     }
   }
@@ -1103,6 +1168,11 @@ function isMatriculado(l) {
   return normalizeStatus(l.STATUS_PENDENTE) === "FINALIZADOM";
 }
 
+function isAgendadoOuFinalizado(l) {
+  const s = normalizeStatus(l.STATUS_PENDENTE);
+  return s === "AGENDADO" || s === "FINALIZADOM";
+}
+
 function normalizeText(s) {
   return String(s || "")
     .trim()
@@ -1125,12 +1195,44 @@ function normalizeMarcaLabel(s) {
   return String(s || "").trim();
 }
 
-function buildWhatsLink(l) {
-  const f = String(l.FONE || "").trim() || String(l.FONE2 || "").trim() || String(l.FONE3 || "").trim();
-  const p = String(f || "").replace(/\D/g, "");
+function cleanPhone(v) {
+  return String(v || "").replace(/\D/g, "");
+}
+
+function getBestPhone(l) {
+  return cleanPhone(l.FONE) || cleanPhone(l.FONE2) || cleanPhone(l.FONE3) || "";
+}
+
+function formatPhoneDisplay(phone) {
+  const p = cleanPhone(phone);
   if (!p) return "";
-  const full = p.startsWith("55") ? p : `55${p}`;
-  return `https://wa.me/${full}`;
+
+  let local = p;
+  if (local.startsWith("55") && local.length >= 12) {
+    local = local.slice(2);
+  }
+
+  if (local.length === 11) {
+    return `(${local.slice(0, 2)}) ${local.slice(2, 7)}-${local.slice(7)}`;
+  }
+
+  if (local.length === 10) {
+    return `(${local.slice(0, 2)}) ${local.slice(2, 6)}-${local.slice(6)}`;
+  }
+
+  return local;
+}
+
+function buildWhatsLink(l) {
+  const phone = getBestPhone(l);
+  if (!phone) return "";
+
+  const full = phone.startsWith("55") ? phone : `55${phone}`;
+  const primeiroNome = String(l.NOME || "").trim().split(/\s+/)[0] || "";
+  const curso = String(l.CURSO || "").trim();
+  const mensagem = `Olá ${primeiroNome}, aqui é do Grau Técnico. Você demonstrou interesse no curso ${curso}. Podemos conversar?`;
+
+  return `https://wa.me/${full}?text=${encodeURIComponent(mensagem)}`;
 }
 
 function toInt(v) {
