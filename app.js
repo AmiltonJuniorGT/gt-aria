@@ -14,7 +14,8 @@
 =================================== */
 
 const SHEET_CSV_URL =
-  "https://docs.google.com/spreadsheets/d/1G74u1KY0ygCT6oS3QC87xQjgzCxt_Iph/gviz/tq?tqx=out:csv&gid=2110829655";
+  "https://docs.google.com/spreadsheets/d/1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI/export?format=csv&gid=1731723852";
+
 const ENABLE_SCORE_IA = true;
 
 const DEFAULT_PRIORIDADE = ["DATA_CADASTRO", "TOTAL_AGENDAMENTOS", "MIDIA", "CURSO"];
