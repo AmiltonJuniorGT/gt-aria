@@ -1,67 +1,119 @@
 /* ================================
    GT ARIA — Qualificação (Google Sheets CSV)
-   - VENDEDOR = PARTIÇÃO FIXA (blocos)
-   - Drag define a CLASSIFICAÇÃO HIERÁRQUICA dentro do vendedor
-   - KPIs seguem filtros
-   - Recência por DATA_CADASTRO
-   - Tabela ordenável por clique (opcional; não quebra o agrupamento)
-   - 2 cards de IA:
-     1) Base Total
-     2) Vendedor
-   - Contato em 2 colunas:
-     1) Telefone
-     2) WhatsApp
 =================================== */
 
 const SHEET_CSV_URL =
-  "https://docs.google.com/spreadsheets/d/1_mVAHiJ2VSsG33de4mFfvffjy8KDufxI/export?format=csv&gid=1731723852";
+  "https://docs.google.com/spreadsheets/d/1vHorcjngmE7Yf69yDFqOJJ1hU1K0N4FwRvbHgsGu-Js/export?format=csv&gid=2110829655";
 
 const ENABLE_SCORE_IA = true;
 
-const DEFAULT_PRIORIDADE = ["DATA_CADASTRO", "TOTAL_AGENDAMENTOS", "MIDIA", "CURSO"];
+let DATA = [];
 
-const SORT_DIR = {
-  DATA_CADASTRO: "desc",
-  TOTAL_AGENDAMENTOS: "asc",
-  MIDIA: "desc",
-  CURSO: "desc",
-};
+const $ = (s) => document.querySelector(s);
 
-const RECENCY_OPTIONS = [
-  { key: "TODOS", label: "Todos" },
-  { key: "0_30", label: "0–30 dias" },
-  { key: "31_60", label: "31–60" },
-  { key: "61_90", label: "61–90" },
-  { key: "90P", label: "90+" },
-];
+async function boot() {
+  try {
+    const res = await fetch(SHEET_CSV_URL);
+    const text = await res.text();
 
-const AGEND_BUCKETS = [
-  { key: "TODOS", label: "Todos" },
-  { key: "0_1", label: "0–1" },
-  { key: "2_3", label: "2–3" },
-  { key: "4P", label: "+4" },
-];
+    const rows = parseCSV(text);
+    DATA = rows;
 
-const WINDOW_OPTIONS = [
-  { key: "TODOS", label: "Todos" },
-  { key: "30", label: "Últimos 30 dias" },
-  { key: "60", label: "Últimos 60 dias" },
-  { key: "90", label: "Últimos 90 dias" },
-  { key: "180", label: "Últimos 180 dias" },
-  { key: "365", label: "Últimos 365 dias" },
-  { key: "CUSTOM", label: "Personalizado (dias)" },
-];
+    render();
+  } catch (err) {
+    renderError(err);
+  }
+}
 
-const state = {
-  loading: false,
-  error: "",
-  lastUpdated: null,
+function parseCSV(str) {
+  const lines = str.split("\n").map((l) => l.trim());
+  const headers = lines.shift().split(",");
 
-  all: [],
-  vendedores: [],
+  return lines.map((line) => {
+    const cols = line.split(",");
+    const obj = {};
+    headers.forEach((h, i) => {
+      obj[h.trim()] = cols[i];
+    });
+    return obj;
+  });
+}
 
-  marcaSelecionada: "AMBOS",
-  vendedorSelecionado: "TODOS",
+function render() {
+  const view = $("#view");
+  if (!view) return;
+
+  view.innerHTML = "";
+
+  if (!DATA.length) {
+    view.innerHTML = `<div class="card">Nenhum dado encontrado</div>`;
+    return;
+  }
+
+  const table = document.createElement("table");
+  table.className = "table";
+
+  const headers = Object.keys(DATA[0]);
+
+  const thead = document.createElement("thead");
+  const trHead = document.createElement("tr");
+
+  headers.forEach((h) => {
+    const th = document.createElement("th");
+    th.textContent = h;
+    trHead.appendChild(th);
+  });
+
+  thead.appendChild(trHead);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+
+  DATA.forEach((row) => {
+    const tr = document.createElement("tr");
+
+    headers.forEach((h) => {
+      const td = document.createElement("td");
+      td.textContent = row[h];
+      tr.appendChild(td);
+    });
+
+    tbody.appendChild(tr);
+  });
+
+  table.appendChild(tbody);
+  view.appendChild(table);
+
+  updateHeader();
+}
+
+function updateHeader() {
+  const top = $(".topbar");
+  if (!top) return;
+
+  const total = DATA.length;
+
+  const label = document.createElement("div");
+  label.className = "kpi";
+  label.innerText = `Leads carregados: ${total}`;
+
+  top.prepend(label);
+}
+
+function renderError(err) {
+  const view = $("#view");
+  if (!view) return;
+
+  view.innerHTML = `
+    <div class="card">
+      <h2 style="color:#8b0000">Erro ao carregar base</h2>
+      <pre>${err}</pre>
+      <button onclick="boot()">Tentar novamente</button>
+    </div>
+  `;
+}
+
+boot();  vendedorSelecionado: "TODOS",
   recenciaSelecionada: "TODOS",
   agendBucket: "TODOS",
 
